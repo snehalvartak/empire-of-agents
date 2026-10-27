@@ -879,6 +879,16 @@ class Simulation {
         await this.recordChat(agent, target, result.chat!.message);
         target.lastBubble = `${agent.name}: "${result.chat!.message}"`;
       }
+    } else if (action.type === 'gift' && result.gift) {
+      agent.mood = 'generous';
+      agent.lastBubble = `gave ${result.gift.item} to ${result.gift.withName}`;
+      const target = this.snapshot.agents.find((a) => a.id === result.gift!.withId);
+      if (target) {
+        target.lastBubble = `${agent.name} gave me ${result.gift.item}!`;
+        // a gift deepens the bond twice as much as a chat
+        await this.bumpRelationship(agent, target, `gave ${result.gift.item}`);
+        await this.bumpRelationship(target, agent, `received ${result.gift.item}`);
+      }
     } else if (action.type === 'eat') {
       agent.mood = 'fed';
       agent.hunger = Math.max(0, (agent.hunger ?? 0) - 60);

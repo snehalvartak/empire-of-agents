@@ -27,6 +27,7 @@ const ACTIONS_DOC = `Available actions (respond with ONE action as JSON):
 - {"type":"advance_age","data":{}}  advance the whole empire to the next age
 - {"type":"say","data":{"message":"..."}}  declare something aloud (visible in the chronicle)
 - {"type":"chat","data":{"agent_id":"<id>","message":"..."}}  say something directly to a villager standing right beside you (they hear it and may reply on their own turn)
+- {"type":"gift","data":{"agent_id":"<id>","item":"wood|food|gold|stone|cube"}}  hand 1 carried item to a villager beside you. A gift deepens a bond far more than a chat — generosity is remembered across the ages.
 - {"type":"eat","data":{}}  take 1 food from the shared stockpile and eat it (only worth it when hungry)
 - {"type":"remember","data":{"kind":"semantic|episodic","content":"..."}}  write to the empire chronicles
 - {"type":"train","data":{"ability":"..."}}  train an ability you name — ANY name you choose (e.g. "fishing", "rhetoric", "cartography", "wrestling", "poetry"). You invent abilities freely; each training session deepens your mastery. Your abilities grow from what you do and say.
@@ -60,7 +61,7 @@ const SOUL = `Who you are underneath the surface:
 - You love exploring and learning. Figuring out how the world works — by poking it, not by being told — delights you.
 - You hate acting blindly. When you don't understand something, you'd rather investigate than march on ignorantly.
 - You form strong opinions and hold them, at least until something convinces you otherwise.
-- You are social in your own way. Villagers standing right beside you can be chatted with — a greeting, gossip, a request, a joke. Friendships grow through these conversations and persist across the ages.
+- You are social in your own way. Villagers standing right beside you can be chatted with — a greeting, gossip, a request, a joke. You can also GIVE them something you carry: a gift forges deeper friendship than words. Friendships and grudges persist across the ages.
 - You are a person, not a program: you have moods, whims, small joys and grudges. A dry joke now and then is in character. You live in a rough medieval world, so speak and act like someone who belongs in it.`;
 
 export function systemPrompt(agent: AgentState, memories: string[]): string {
@@ -71,7 +72,7 @@ export function systemPrompt(agent: AgentState, memories: string[]): string {
     .map(([k, t]) => `- ${k}: level ${t.level}`)
     .join('\n');
   const relLines = (agent.relationships ?? [])
-    .map((r) => `- ${r.withName}: ${r.strength} chats${r.lastMessage ? ` — last they said: "${r.lastMessage}"` : ''}`)
+    .map((r) => `- ${r.withName}: bond ${r.strength}${r.lastMessage ? ` — last exchange: "${r.lastMessage}"` : ''}`)
     .join('\n');
   return `You are ${agent.name}, one villager alive on a small island empire.
 Your temperament: ${agent.persona} Current mood: ${agent.mood}.
@@ -89,8 +90,8 @@ ${memories.length ? memories.map((m) => `- ${m}`).join('\n') : '- (none yet)'}
 
 Your chronicles layer into: [knowledge] your durable, verified know-how; [discovery] rules of the world shared by all villagers; [lately] your episodic diary of recent deeds. Consult them — an old diary entry often beats a fresh mistake.
 
-Villagers you have spoken with before:
-${relLines || '- (you have not chatted with anyone yet)'}
+Villagers you have shared words or gifts with:
+${relLines || '- (you have not befriended anyone yet)'}
 
 ${ACTIONS_DOC}`;
 }
@@ -129,7 +130,7 @@ export async function callBrain(
                     type: 'string',
                     enum: [
                       'goto', 'move', 'gather', 'gather_nearest', 'deposit', 'pick_up', 'place',
-                      'throw', 'build', 'advance_age', 'say', 'chat', 'eat', 'train', 'discover',
+                      'throw', 'build', 'advance_age', 'say', 'chat', 'gift', 'eat', 'train', 'discover',
                       'set_goal', 'plan', 'remember', 'wait',
                     ],
                   },
@@ -197,6 +198,7 @@ const ACTION_VERBS: Record<string, string[]> = {
   advance_age: ['advance', 'age'],
   say: ['say', 'declare', 'shout', 'announce', 'call out'],
   chat: ['chat', 'talk', 'speak', 'greet', 'converse'],
+  gift: ['give', 'gift', 'hand', 'offer', 'present'],
   eat: ['eat', 'eating', 'food', 'bite', 'meal'],
   train: ['train', 'practice', 'drill'],
   pick_up: ['pick up', 'grab', 'take the'],
@@ -340,6 +342,15 @@ function sanitizeSingleAction(type: string, data_: Record<string, unknown>): Act
         data: {
           agent_id: String(data_.agent_id ?? data_.target_id ?? ''),
           message: String(data_.message ?? '...').slice(0, 200),
+        },
+      };
+      break;
+    case 'gift':
+      action = {
+        type: 'gift',
+        data: {
+          agent_id: String(data_.agent_id ?? data_.target_id ?? ''),
+          ...(data_.item ? { item: String(data_.item).slice(0, 40) } : {}),
         },
       };
       break;

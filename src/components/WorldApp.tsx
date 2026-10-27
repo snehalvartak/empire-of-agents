@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
-  Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn,
+  Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn, Lightbulb, Music,
 } from 'lucide-react';
-import { Timeline, detectKeyMoments, type TimelineEvent, type KeyMoment } from '@/components/PaperViews';
+import { Timeline, Discoveries, detectKeyMoments, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
 import { useReplayPlayer, ReplayControls, type ReplayCheckpoint } from '@/components/ReplayPlayer';
 import { useHeatmap } from '@/components/Heatmap';
 import { Panel, PixelButton, Badge } from '@/components/ui/Pixel';
@@ -11,6 +11,7 @@ import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
 import type { SessionRow } from '@/sim/simulation';
 import { resetWorldOnDeploy } from '@/sim/reset';
+import { soundOn, setSoundOn, playEventSound } from '@/lib/sounds';
 import { VoxelWorld } from '@/components/VoxelWorld';
 import { AgentAvatar } from '@/components/AgentAvatar';
 import type { TerritoryId, WorldSnapshot } from '@/sim/world';
@@ -109,7 +110,7 @@ export default function WorldApp() {
   const [suspectedFalse, setSuspectedFalse] = useState<Set<string>>(new Set());
   const [heatRows, setHeatRows] = useState<Array<{ agent_id: string; x: number; y: number }>>([]);
   const [heatmapOn, setHeatmapOn] = useState(false);
-  const [tab, setTab] = useState<'log' | 'timeline' | 'memories' | 'minds' | 'replay'>('log');
+  const [tab, setTab] = useState<'log' | 'timeline' | 'memories' | 'minds' | 'discoveries' | 'replay'>('log');
   const [sayEvent, setSayEvent] = useState<{ id: string; agentId: string; message: string } | null>(null);
 
   const [showAdd, setShowAdd] = useState(false);
@@ -145,6 +146,7 @@ export default function WorldApp() {
       return true;
     }
   });
+  const [sound, setSound] = useState(() => soundOn());
   const [civDeltas, setCivDeltas] = useState<Record<string, number>>({});
   const prevCivRef = useRef<CivRow | null>(null);
 
@@ -193,6 +195,7 @@ export default function WorldApp() {
         const row = payload.new as EventRow;
         if (viewing !== 'live' || row.session_id !== sim.session?.id) return;
         setEvents((prev) => [row, ...prev].slice(0, 100));
+        playEventSound(row.type);
         if (row.type === 'say' && row.agent_id) {
           setSayEvent({ id: row.id, agentId: row.agent_id, message: row.message.replace(/^[^:]*:\s*/, '') });
         }
@@ -231,6 +234,14 @@ export default function WorldApp() {
       } catch {
         /* private mode */
       }
+      return next;
+    });
+  }
+
+  function toggleSound() {
+    setSound((v) => {
+      const next = !v;
+      setSoundOn(next);
       return next;
     });
   }
@@ -436,6 +447,13 @@ export default function WorldApp() {
               className="rounded-md border border-amber-800/50 p-1.5 text-amber-200/70 hover:bg-amber-900/30"
             >
               {bubblesOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
+            </button>
+            <button
+              onClick={toggleSound}
+              title={sound ? 'Sound effects on' : 'Sound effects muted'}
+              className="rounded-md border border-amber-800/50 p-1.5 text-amber-200/70 hover:bg-amber-900/30"
+            >
+              {sound ? <Music size={14} /> : <VolumeX size={14} />}
             </button>
             <button
               onClick={() => setShowSettings(true)}
@@ -843,6 +861,16 @@ export default function WorldApp() {
                 <ChartNoAxesColumn size={14} /> Timeline
               </button>
               <button
+                onClick={() => setTab('discoveries')}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${
+                  tab === 'discoveries'
+                    ? 'border-b-2 border-amber-500 text-amber-200'
+                    : 'text-amber-100/40'
+                }`}
+              >
+                <Lightbulb size={14} /> Discoveries
+              </button>
+              <button
                 onClick={() => setTab('replay')}
                 className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${
                   tab === 'replay'
@@ -1034,9 +1062,21 @@ export default function WorldApp() {
                                   {formatDate(s.started_at)}
                                 </span>
                               </div>
-                              <div className="mt-0.5 text-xs text-amber-100/50">
-                                {s.summary ?? `${s.ticks ?? 0} ticks`}
+                              <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                                  {AGE_NAMES[(s.age ?? 1) - 1] ?? `Age ${s.age ?? 1}`}
+                                </span>
+                                {(['wood', 'food', 'gold', 'stone'] as const).map((k) => (
+                                  <span key={k} className="flex items-center gap-0.5 text-[11px] text-amber-100/70">
+                                    <ResourceIcon kind={k} />
+                                    {s[k] ?? 0}
+                                  </span>
+                                ))}
+                                <span className="text-[10px] text-amber-100/35">t{s.ticks ?? 0}</span>
                               </div>
+                              {s.summary && (
+                                <div className="mt-0.5 text-xs text-amber-100/50">{s.summary}</div>
+                              )}
                             </button>
                           ))}
                       </div>
@@ -1148,6 +1188,23 @@ export default function WorldApp() {
                   )}
                 </div>
               )}
+              {tab === 'discoveries' && (() => {
+                const discoveryEntries: DiscoveryEntry[] = memories
+                  .filter((m) => m.kind === 'discovery')
+                  .map((m) => ({
+                    id: m.id,
+                    agent_id: m.agent_id,
+                    content: m.content,
+                    tick: typeof (m as { tick?: number }).tick === 'number' ? (m as { tick?: number }).tick! : null,
+                    created_at: m.created_at,
+                  }));
+                return (
+                  <Discoveries
+                    entries={discoveryEntries}
+                    agents={agents.map((a) => ({ id: a.id, name: a.name, color: a.color }))}
+                  />
+                );
+              })()}
               {tab === 'memories' && (
                 <div className="space-y-2">
                   <div className="flex flex-wrap gap-1">

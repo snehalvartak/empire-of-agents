@@ -201,6 +201,7 @@ export type ActionInput =
   | { type: 'advance_age'; data: Record<string, never> }
   | { type: 'say'; data: { message: string } }
   | { type: 'chat'; data: { agent_id: string; message: string } }
+  | { type: 'gift'; data: { agent_id: string; item?: string } }
   | { type: 'eat'; data: Record<string, never> }
   | { type: 'train'; data: { ability: string } }
   | { type: 'pick_up'; data: { object_id: string } }
@@ -300,6 +301,7 @@ export interface ActionResult {
   built?: { id: string; structure: WorldObject['kind']; pos: GridPos; by: string };
   spawned?: Array<{ id: string; pos: GridPos; by: string }>;
   chat?: { withId: string; withName: string; message: string };
+  gift?: { withId: string; withName: string; item: string };
 }
 
 const RESOURCE_LABEL: Record<ResourceKind, string> = {
@@ -723,6 +725,27 @@ export function step(
       };
     }
 
+    case 'gift': {
+      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
+      if (!target) return { ok: false, message: 'No such villager to give to.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing.', events };
+      const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
+      if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
+      if (agent.inventory.length === 0) return { ok: false, message: 'Your hands are empty. Gather something before giving.', events };
+      const wanted = action.data.item?.trim();
+      const idx = wanted ? agent.inventory.indexOf(wanted) : 0;
+      if (idx === -1) return { ok: false, message: `You are not carrying ${wanted || 'that'}. Carrying: ${agent.inventory.join(', ') || 'nothing'}.`, events };
+      if (target.inventory.length >= 2) return { ok: false, message: `${target.name}'s hands are full — they cannot take more.`, events };
+      const item = agent.inventory.splice(idx, 1)[0];
+      target.inventory.push(item);
+      return {
+        ok: true,
+        message: `You give 1 ${item} to ${target.name}. They accept it warmly. Carrying: ${agent.inventory.join(', ') || 'nothing'}.`,
+        events: [{ type: 'gift', message: `${agent.name} gave 1 ${item} to ${target.name}`, data: { item } }],
+        gift: { withId: target.id, withName: target.name, item },
+      };
+    }
+
     case 'eat': {
       if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first.', events };
       if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map.', events };
@@ -821,7 +844,10 @@ export function observe(
   );
   lines.push(`Fellow villagers: ${othersStr}.`);
   if (closeBy.length) {
-    lines.push(`Standing right beside you (close enough to chat): ${closeBy.map((a) => `${a.name} (${a.id.slice(0, 8)})`).join('; ')}.`);
+    lines.push(`Standing right beside you (close enough to chat or give): ${closeBy.map((a) => `${a.name} (${a.id.slice(0, 8)})`).join('; ')}.`);
+  }
+  if (agent.inventory.length > 0 && closeBy.length) {
+    lines.push('- gift {agent_id}: hand 1 carried item to a villager beside you — a gift deepens a bond');
   }
   if (history && history.length) {
     lines.push('Your last actions and what happened:');

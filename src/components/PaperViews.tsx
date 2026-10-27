@@ -167,6 +167,62 @@ export function Timeline({
   );
 }
 
+export interface DiscoveryEntry {
+  id: string;
+  agent_id: string | null;
+  content: string;
+  tick: number | null;
+  created_at: string;
+}
+
+/** Parchment list of a session's discoveries, newest first (memory kind = 'discovery'). */
+export function Discoveries({
+  entries,
+  agents,
+}: {
+  entries: DiscoveryEntry[];
+  agents: TimelineAgent[];
+}) {
+  if (entries.length === 0) {
+    return (
+      <p className="p-2 text-sm text-amber-100/40">
+        No discoveries yet. When a villager notes a rule of the world, it is inscribed here for
+        every generation after.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {entries.map((d) => {
+        const agent = agents.find((a) => a.id === d.agent_id);
+        return (
+          <div
+            key={d.id}
+            className="rounded-xl border border-cyan-800/30 bg-[#15100a]/60 px-3 py-2.5"
+          >
+            <div className="mb-1 flex items-center gap-2">
+              <span
+                className="h-2 w-2 rounded-sm"
+                style={{ backgroundColor: agent?.color ?? '#4cc9d4' }}
+              />
+              <span className="text-xs font-medium text-amber-100">
+                {agent?.name ?? 'The empire'}
+              </span>
+              <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] text-cyan-300">
+                discovery
+              </span>
+              {typeof d.tick === 'number' && (
+                <span className="ml-auto text-[10px] text-amber-100/35">t{d.tick}</span>
+              )}
+            </div>
+            <p className="text-sm italic leading-relaxed text-amber-50/85">“{d.content}”</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export interface KeyMoment {
   kind: string;
   label: string;

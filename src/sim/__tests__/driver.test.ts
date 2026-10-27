@@ -8,6 +8,7 @@ import {
   decideLease,
   leaseClaimFilter,
   leaseCutoffIso,
+  leaseReleaseRequest,
   toIso,
 } from '../driver.ts';
 
@@ -194,5 +195,43 @@ describe('G5 — the lease module reads no clock', () => {
     for (const call of ['Date.now', 'new Date', 'performance.now']) {
       expect(source, `driver.ts uses ${call}`).not.toContain(call);
     }
+  });
+});
+
+describe('G5 / R7.6 — leaseReleaseRequest (the release sent while the page unloads)', () => {
+  const api = { url: 'https://abc.supabase.co/', anonKey: 'anon-key' };
+  const SESSION = 'cccccccc-0000-4000-8000-000000000003';
+
+  it('is the PostgREST PATCH that frees only my own lease, survives the page (keepalive) and needs no async auth lookup', () => {
+    const r = leaseReleaseRequest(api, SESSION, ME);
+    expect(r.url).toBe(`https://abc.supabase.co/rest/v1/sessions?id=eq.${SESSION}&driver_id=eq.${ME}`);
+    expect(r.init.method).toBe('PATCH');
+    expect(r.init.keepalive).toBe(true);
+    expect(r.init.headers).toEqual({
+      apikey: 'anon-key',
+      Authorization: 'Bearer anon-key',
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    });
+    expect(JSON.parse(r.init.body)).toEqual({ driver_id: null, driver_heartbeat_at: null });
+  });
+
+  it('refuses ids that could change the filter (they go straight into the URL)', () => {
+    expect(() => leaseReleaseRequest(api, SESSION, 'x&or=(id.not.is.null)')).toThrow();
+    expect(() => leaseReleaseRequest(api, SESSION, '')).toThrow();
+    expect(() => leaseReleaseRequest(api, `${SESSION}&status=eq.live`, ME)).toThrow();
+    expect(() => leaseReleaseRequest(api, '', ME)).toThrow();
+  });
+
+  it('simulation.ts frees the lease from the unload handlers through it, synchronously, not through the query builder', () => {
+    const source = readFileSync(fileURLToPath(new URL('../simulation.ts', import.meta.url)), 'utf8');
+    expect(source).toMatch(/const release = \(\) => this\.releaseOnUnload\(\);\s+window\.addEventListener\('pagehide', release\);\s+window\.addEventListener\('beforeunload', release\);/);
+    const start = source.indexOf('private releaseOnUnload()');
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, source.indexOf('\n  }\n', start));
+    expect(body).toContain('leaseReleaseRequest(apiConfig');
+    expect(body).toContain('fetch(url, init)');
+    expect(body).not.toContain('await');
+    expect(body).not.toContain('supabase.from');
   });
 });

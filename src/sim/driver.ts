@@ -71,3 +71,37 @@ export function leaseClaimFilter(myId: string, nowMs: number): string {
   assertSafeDriverId(myId);
   return `driver_id.is.null,driver_id.eq.${myId},driver_heartbeat_at.is.null,driver_heartbeat_at.lte.${leaseCutoffIso(nowMs)}`;
 }
+
+/** Where the API lives and the public key it is called with (what `createClient` is given). */
+export interface ApiConfig {
+  url: string;
+  anonKey: string;
+}
+
+/**
+ * The request that frees the lease when the window goes away, as a plain `fetch` call that can be made
+ * synchronously inside the `pagehide` handler. The supabase-js query builder cannot be used there: it looks
+ * up the auth session (async, behind a lock) before it sends anything, so a page that is unloading may stop
+ * running before the request exists, and the era then stays "driven by another window" for the 30 s TTL. The
+ * real-browser run found this: about 1 reload in 10 never sent its release. `keepalive` lets the browser finish
+ * the request after the page is gone. Only the holder's own lease is freed (`driver_id=eq.<me>`), as in
+ * the normal release.
+ */
+export function leaseReleaseRequest(api: ApiConfig, sessionId: string, myId: string) {
+  assertSafeDriverId(myId);
+  if (!/^[A-Za-z0-9-]+$/.test(sessionId)) throw new Error('Session id may only contain letters, digits and hyphens.');
+  return {
+    url: `${api.url.replace(/\/+$/, '')}/rest/v1/sessions?id=eq.${sessionId}&driver_id=eq.${myId}`,
+    init: {
+      method: 'PATCH' as const,
+      keepalive: true as const,
+      headers: {
+        apikey: api.anonKey,
+        Authorization: `Bearer ${api.anonKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({ driver_id: null, driver_heartbeat_at: null }),
+    },
+  };
+}

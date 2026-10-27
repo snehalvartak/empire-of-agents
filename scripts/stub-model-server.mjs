@@ -110,6 +110,30 @@ function completion(model, content) {
  * `url` is what the harness takes as the Supabase URL (the app appends /functions/v1/agent-brain).
  */
 export function startStubServer({ port = 0, anonKey = 'stub-anon-key' } = {}) {
+  const { handler, stats } = createStubHandler({ anonKey });
+  const server = http.createServer(handler);
+
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      const actual = server.address().port;
+      resolve({
+        server,
+        port: actual,
+        url: `http://127.0.0.1:${actual}`,
+        stats,
+        close: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }),
+      });
+    });
+  });
+}
+
+/**
+ * The stub's request handler on its own, for callers that bring their own server (the end-to-end
+ * gateway, scripts/e2e/gateway.mjs). Answers only `POST /functions/v1/agent-brain` (and OPTIONS);
+ * everything else is a 404. Returns { handler(req, res), stats }.
+ */
+export function createStubHandler({ anonKey = 'stub-anon-key' } = {}) {
   const stats = {
     requests: 0, turns: 0, retries: 0, unauthorized: 0, badRequests: 0,
     faultInvalid: 0, faultMismatch: 0, faultPlan: 0, faultInvalidRetryAlsoBad: 0,
@@ -157,7 +181,7 @@ export function startStubServer({ port = 0, anonKey = 'stub-anon-key' } = {}) {
     return JSON.stringify(policy(observation));
   }
 
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     const send = (status, obj) => {
       res.writeHead(status, { ...CORS, 'Content-Type': 'application/json' });
       res.end(JSON.stringify(obj));
@@ -181,21 +205,9 @@ export function startStubServer({ port = 0, anonKey = 'stub-anon-key' } = {}) {
       }
       send(200, completion(body.model, reply(body)));
     });
-  });
+  };
 
-  return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      const actual = server.address().port;
-      resolve({
-        server,
-        port: actual,
-        url: `http://127.0.0.1:${actual}`,
-        stats,
-        close: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }),
-      });
-    });
-  });
+  return { handler, stats };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

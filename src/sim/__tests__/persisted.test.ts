@@ -423,4 +423,14 @@ describe('E1 — simulation.ts goes through persisted.ts', () => {
     expect(fork).toContain("update({ inbox: carriedPatch(a).inbox })");
     expect(source.match(/inventory: \[\],\s+inbox: \[\],/g)).toHaveLength(2); // new villager, starting villagers
   });
+
+  it('keeps the roster order unambiguous: the starting cast is inserted one villager per statement (one INSERT gives every row the same now(), found by the real-database run), and every roster read is ordered by created_at then id', () => {
+    const seed = body('seedStartingVillagers');
+    expect(seed).toMatch(/for \(const v of STARTING_VILLAGERS\) \{\s+const \{ error \} = await supabase\.from\('agents'\)\.insert\(\{/);
+    expect(seed).not.toMatch(/insert\(\s*STARTING_VILLAGERS\.map/);
+    expect(seed).toContain(".delete().eq('session_id', sessionId)"); // a failure never leaves half a cast
+    const rosterReads = source.match(/\.from\('agents'\)\s+\.select\('\*'\)\s+\.eq\('session_id', sid\)\s+\.order\('created_at', \{ ascending: true \}\)\s+\.order\('id', \{ ascending: true \}\)/g) ?? [];
+    expect(rosterReads).toHaveLength(2); // loadWorld reads the roster twice (before and after seeding)
+    expect(source).not.toMatch(/\.order\('created_at', \{ ascending: true \}\);/); // no roster read without the tie-break
+  });
 });

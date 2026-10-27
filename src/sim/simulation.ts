@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { apiConfig, supabase } from '@/lib/supabase';
 import type { ActionInput, AgentState, CivState, TerritoryId, WorldObject, WorldSnapshot } from './world';
 import {
   MAX_VILLAGERS,
@@ -32,7 +32,7 @@ import { eventsForResult, planEndRow } from './chronicle';
 import { bondExchange, createBondWriter, recordBond } from './bonds';
 import type { Bond, BondExchange, PairRow } from './bonds';
 import { grantXp, sanitizeTraits } from './traits';
-import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, toIso } from './driver';
+import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, leaseReleaseRequest, toIso } from './driver';
 
 export interface SessionRow {
   id: string;
@@ -153,7 +153,7 @@ class Simulation {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      const release = () => void this.releaseLease();
+      const release = () => this.releaseOnUnload();
       window.addEventListener('pagehide', release);
       window.addEventListener('beforeunload', release);
     }
@@ -507,7 +507,8 @@ class Simulation {
       .from('agents')
       .select('*')
       .eq('session_id', sid)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true }); // id breaks a created_at tie (rows of an older era seeded in one INSERT), so the roster order is always the same
     let agentRows = agentRowsData;
     if (error) {
       this.error = 'Could not load villagers from the database.';
@@ -526,7 +527,8 @@ class Simulation {
         .from('agents')
         .select('*')
         .eq('session_id', sid)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true });
       agentRows = rows ?? [];
     }
 
@@ -734,27 +736,28 @@ class Simulation {
   private async seedStartingVillagers(): Promise<boolean> {
     if (!this.session) return false;
     const sessionId = this.session.id;
-    const seeded = await supabase
-      .from('agents')
-      .insert(
-        STARTING_VILLAGERS.map((v) => ({
-          session_id: sessionId,
-          name: v.name,
-          model: MODELS_DEFAULT,
-          color: v.color,
-          island: v.territory,
-          position: { x: v.pos.x, y: v.pos.y },
-          persona: v.persona,
-          mood: 'curious',
-          status: 'idle',
-          inventory: [],
-          inbox: [],
-        }))
-      )
-      .select();
-    if (seeded.error) {
-      console.error('Seeding villagers failed:', seeded.error.message);
-      return false;
+    // One INSERT per villager, in manifest order. Every row of a single multi-row INSERT gets the same now(), and
+    // the roster (join order, which the turn cursor of R7.5 is defined against) is read back ORDER BY created_at:
+    // with a tie the database may return the starting cast in either order, and a different one after an UPDATE.
+    for (const v of STARTING_VILLAGERS) {
+      const { error } = await supabase.from('agents').insert({
+        session_id: sessionId,
+        name: v.name,
+        model: MODELS_DEFAULT,
+        color: v.color,
+        island: v.territory,
+        position: { x: v.pos.x, y: v.pos.y },
+        persona: v.persona,
+        mood: 'curious',
+        status: 'idle',
+        inventory: [],
+        inbox: [],
+      });
+      if (error) {
+        console.error('Seeding villagers failed:', error.message);
+        await supabase.from('agents').delete().eq('session_id', sessionId); // never leave half a cast behind
+        return false;
+      }
     }
     await this.logEvent({
       agent_id: null,
@@ -1047,6 +1050,20 @@ class Simulation {
         .update({ driver_id: null, driver_heartbeat_at: null })
         .eq('id', this.session.id)
         .eq('driver_id', this.driverId);
+    } catch {
+      // best-effort: a lease that is not released simply times out
+    }
+  }
+
+  /**
+   * The window is going away (reload, close): free the lease with a request that is sent right now, in this
+   * task, and survives the page (leaseReleaseRequest). A window that is not driving has nothing to free.
+   */
+  private releaseOnUnload() {
+    if (!this.session || !(this.running || this.heartbeat)) return;
+    try {
+      const { url, init } = leaseReleaseRequest(apiConfig, this.session.id, this.driverId);
+      void fetch(url, init).catch(() => undefined);
     } catch {
       // best-effort: a lease that is not released simply times out
     }

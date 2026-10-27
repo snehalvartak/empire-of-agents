@@ -867,7 +867,7 @@ export default function WorldApp() {
         {/* right column */}
         <div className="space-y-4">
           <Panel>
-            <div className="flex border-b border-amber-900/40">
+            <div className="flex flex-wrap border-b border-amber-900/40">
               <button
                 onClick={() => setTab('log')}
                 className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${

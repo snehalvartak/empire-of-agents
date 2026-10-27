@@ -14,6 +14,7 @@
     "harness": "node scripts/agent-loop-reliability.mjs",
     "harness:smoke": "node scripts/harness-smoke.mjs",
     "check:migrations": "bash scripts/check-migrations.sh",
+    "e2e": "node scripts/e2e/run-e2e.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "pretest": "npm run manifest",
     "test": "vitest run"

@@ -69,6 +69,24 @@ describe('H2 / R5.2 / R5.4 — hints', () => {
     expect(rock).toMatch(/^- goto \(10,19\): the Standing Rock, \d+ steps away$/);
   });
 
+  it('R5.4: the strange cube hint states a location and distance only, never how to use it', () => {
+    const { snap, agent } = world({ x: 7, y: 8 }, []);
+    const cube = availableActions(snap, agent).find((h) => h.includes('strange cube'));
+    expect(cube).toBeDefined();
+    expect(cube).toMatch(/^- goto \(\d+,\d+\): a strange cube, \d+ steps away$/);
+  });
+
+  it('R5.4: no goto hint mentions pick_up, place or throw', () => {
+    for (const pos of POSITIONS) {
+      for (const inventory of INVENTORIES) {
+        const { snap, agent } = world(pos, inventory);
+        for (const hint of availableActions(snap, agent).filter((h) => h.startsWith('- goto'))) {
+          expect(hint, `from (${pos.x},${pos.y}) carrying [${inventory}]`).not.toMatch(/pick_up|place|throw/i);
+        }
+      }
+    }
+  });
+
   it('H2: a deposit hint appears only when carrying resources and standing beside the Town Center', () => {
     const tc = { x: 7, y: 7 };
     for (let x = 0; x < GRID_SIZE; x++) {

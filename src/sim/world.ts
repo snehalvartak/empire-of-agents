@@ -430,7 +430,7 @@ export function step(
   action: ActionInput
 ): ActionResult {
   const agent = snapshot.agents.find((a) => a.id === agentId);
-  if (!agent) return { ok: false, message: 'Unknown villager', events: [] };
+  if (!agent) return { ok: false, message: 'Unknown villager — no such villager stands in the empire. Try again on your next turn.', events: [] };
 
   const events: ActionResult['events'] = [];
   const dirName = (dx: number, dy: number) =>
@@ -440,7 +440,7 @@ export function step(
     case 'move': {
       const { dx, dy } = action.data;
       if (Math.abs(dx) + Math.abs(dy) !== 1) {
-        return { ok: false, message: 'Move exactly 1 step: dx/dy of -1, 0 or 1', events };
+        return { ok: false, message: 'Move exactly 1 step in a single direction (dx or dy of -1 or 1, the other 0). To travel farther, use goto with a tile instead.', events };
       }
       const next = { x: agent.pos.x + dx, y: agent.pos.y + dy };
       if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE) {
@@ -453,7 +453,7 @@ export function step(
         (a) => a.id !== agent.id && a.pos.x === next.x && a.pos.y === next.y
       );
       if (other) {
-        return { ok: false, message: `${other.name} is standing there.`, events };
+        return { ok: false, message: `${other.name} is standing there. Step around them, choose another direction, or goto a tile beyond them.`, events };
       }
       const prev = territoryAt(agent.pos);
       agent.pos = next;
@@ -510,14 +510,14 @@ export function step(
         obj = candidates[0].o;
       } else {
         obj = snapshot.objects.find((o) => o.id === action.data.object_id);
-        if (!obj) return { ok: false, message: 'No such resource.', events };
+        if (!obj) return { ok: false, message: 'No resource with that id exists here (it may be depleted already). Pick an id from "You see nearby", or gather_nearest once a resource is beside you.', events };
       }
       const reach = Math.max(Math.abs(obj.pos.x - agent.pos.x), Math.abs(obj.pos.y - agent.pos.y));
       if (reach > 1) {
         return { ok: false, message: `The ${obj.kind.replace('_', ' ')} is beyond arm's reach. March onto or right beside it first (goto).`, events };
       }
       const res = nodeResource(obj.kind);
-      if (!res) return { ok: false, message: `A ${obj.kind.replace('_', ' ')} is not a resource to gather.`, events };
+      if (!res) return { ok: false, message: `A ${obj.kind.replace('_', ' ')} is not a resource to gather. Choose a tree, berry bush, mine or animal instead.`, events };
       if (agent.inventory.length >= 2) {
         return { ok: false, message: 'You are carrying enough (max 2). Deposit at the Town Center first.', events };
       }
@@ -547,7 +547,7 @@ export function step(
         return { ok: false, message: carriedCubes.length ? 'You carry only a strange cube — the Town Center wants no part of it. Place or throw it instead.' : 'You carry nothing to deposit. Gather something first.', events };
       }
       const tc = snapshot.objects.find((o) => o.kind === 'town_center');
-      if (!tc) return { ok: false, message: 'There is no Town Center on the map.', events };
+      if (!tc) return { ok: false, message: 'There is no Town Center on the map, so there is nowhere to deposit. Try something else meanwhile, such as wander.', events };
       if (Math.abs(tc.pos.x - agent.pos.x) + Math.abs(tc.pos.y - agent.pos.y) > 1) {
         return {
           ok: false,
@@ -578,7 +578,7 @@ export function step(
         return { ok: false, message: 'Unknown structure. Choose: house, mill, barracks, watch_tower, wonder.', events };
       }
       if (snapshot.objects.length >= MAX_OBJECTS) {
-        return { ok: false, message: 'The known world is getting crowded.', events };
+        return { ok: false, message: 'The known world is too crowded to hold another structure. Try gathering or exploring (wander) instead.', events };
       }
       const cost = BUILD_COSTS[structure];
       const civ = snapshot.civ;
@@ -619,13 +619,13 @@ export function step(
     case 'advance_age': {
       const civ = snapshot.civ;
       if (civ.age >= 4) {
-        return { ok: false, message: 'The empire already stands in the Imperial Age. Glory is now built, not researched.', events };
+        return { ok: false, message: 'The empire already stands in the Imperial Age. Glory is now built, not researched. Gather for a wonder and build it instead.', events };
       }
       const cost = AGE_COSTS[civ.age]; // age 1 -> 2 uses AGE_COSTS[1]
       if (civ.wood < cost.wood || civ.food < cost.food || civ.gold < cost.gold) {
         return {
           ok: false,
-          message: `Advancing to ${AGE_NAMES[civ.age]} requires ${cost.wood} wood, ${cost.food} food, ${cost.gold} gold in the stockpile. Gather more.`,
+          message: `Advancing to ${AGE_NAMES[civ.age]} requires ${cost.wood} wood, ${cost.food} food, ${cost.gold} gold in the stockpile. Gather more and deposit it at the Town Center first.`,
           events,
         };
       }
@@ -645,9 +645,9 @@ export function step(
 
     case 'pick_up': {
       const obj = snapshot.objects.find((o) => o.id === action.data.object_id);
-      if (!obj) return { ok: false, message: 'No such object here.', events };
+      if (!obj) return { ok: false, message: 'No object with that id is here (a cube may have been moved or picked up). Pick an id from "You see nearby", and march beside it first (goto).', events };
       if (obj.kind !== 'cube') {
-        return { ok: false, message: `The ${obj.kind.replace('_', ' ')} cannot be picked up. Only the strange cubes can.`, events };
+        return { ok: false, message: `The ${obj.kind.replace('_', ' ')} cannot be picked up. Only the strange cubes can — gather resources instead, or goto a cube first.`, events };
       }
       const reach = Math.max(Math.abs(obj.pos.x - agent.pos.x), Math.abs(obj.pos.y - agent.pos.y));
       if (reach > 1) return { ok: false, message: `The cube is at (${obj.pos.x}, ${obj.pos.y}) — march onto or beside it first.`, events };
@@ -664,10 +664,10 @@ export function step(
     }
 
     case 'place': {
-      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to place.', events };
+      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to place. Goto a strange cube and pick_up it first.', events };
       const t = { x: agent.pos.x + clampInt(action.data.dx, -1, 1), y: agent.pos.y + clampInt(action.data.dy, -1, 1) };
       if (t.x < 0 || t.y < 0 || t.x >= GRID_SIZE || t.y >= GRID_SIZE || !canStand(t)) {
-        return { ok: false, message: 'You cannot set the cube down there — open water.', events };
+        return { ok: false, message: 'You cannot set the cube down there — open water. Choose another direction (dx/dy -1..1) that leads onto land.', events };
       }
       if (tileOccupied(snapshot, t)) {
         return { ok: false, message: 'Something already stands on that tile. Choose an empty one.', events };
@@ -684,10 +684,10 @@ export function step(
     }
 
     case 'throw': {
-      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to throw.', events };
+      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to throw. Goto a strange cube and pick_up it first.', events };
       const dx = clampInt(action.data.dx, -3, 3);
       const dy = clampInt(action.data.dy, -3, 3);
-      if (dx === 0 && dy === 0) return { ok: false, message: 'Give the throw a direction (dx/dy, up to 3).', events };
+      if (dx === 0 && dy === 0) return { ok: false, message: 'A throw needs a direction. Choose dx/dy up to 3 — for example dx 2, dy 0.', events };
       const ux = Math.sign(dx);
       const uy = Math.sign(dy);
       const range = Math.max(Math.abs(dx), Math.abs(dy));
@@ -707,7 +707,7 @@ export function step(
         cur = next;
         flew++;
       }
-      if (flew === 0) return { ok: false, message: 'The way is blocked — the cube drops back into your hands.', events };
+      if (flew === 0) return { ok: false, message: 'The way is blocked — the cube drops back into your hands. Try throwing in another direction, or place it on an empty tile instead.', events };
       agent.inventory = agent.inventory.filter((i) => i !== 'cube');
       if (rock) {
         const spawned: NonNullable<ActionResult['spawned']> = [];
@@ -786,8 +786,8 @@ export function step(
 
     case 'chat': {
       const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
-      if (!target) return { ok: false, message: 'No such villager to chat with.', events };
-      if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again?', events };
+      if (!target) return { ok: false, message: 'No such villager to chat with. Use an id from "Standing right beside you" or "Fellow villagers", and stand beside them first.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again? Choose a villager standing beside you to chat with, or use say to speak aloud instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
       if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
       const msg = action.data.message.slice(0, 200);
@@ -812,15 +812,15 @@ export function step(
 
     case 'gift': {
       const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
-      if (!target) return { ok: false, message: 'No such villager to give to.', events };
-      if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing.', events };
+      if (!target) return { ok: false, message: 'No such villager to give to. Use an id from "Standing right beside you", and stand beside them first.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing. Choose a villager standing beside you instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
       if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
       if (agent.inventory.length === 0) return { ok: false, message: 'Your hands are empty. Gather something before giving.', events };
       const wanted = action.data.item?.trim();
       const idx = wanted ? agent.inventory.indexOf(wanted) : 0;
-      if (idx === -1) return { ok: false, message: `You are not carrying ${wanted || 'that'}. Carrying: ${agent.inventory.join(', ') || 'nothing'}.`, events };
-      if (target.inventory.length >= 2) return { ok: false, message: `${target.name}'s hands are full — they cannot take more.`, events };
+      if (idx === -1) return { ok: false, message: `You are not carrying ${wanted || 'that'}. Carrying: ${agent.inventory.join(', ') || 'nothing'}. Choose one of those, or omit the item to give the first.`, events };
+      if (target.inventory.length >= 2) return { ok: false, message: `${target.name}'s hands are full — they cannot take more. Wait for them to deposit, or give to someone else instead.`, events };
       const item = agent.inventory.splice(idx, 1)[0];
       target.inventory.push(item);
       return {
@@ -832,8 +832,8 @@ export function step(
     }
 
     case 'eat': {
-      if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first.', events };
-      if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map.', events };
+      if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first, then deposit it at the Town Center.', events };
+      if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map, so there is nowhere to eat. Try something else meanwhile, such as wander.', events };
       snapshot.civ.food -= 1;
       return {
         ok: true,
@@ -857,7 +857,7 @@ export function step(
           !snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === p.x && a.pos.y === p.y)
       );
       if (options.length === 0) {
-        return { ok: false, message: 'Every step around you is blocked. There is nowhere to wander.', events };
+        return { ok: false, message: 'Every step around you is blocked. There is nowhere to wander. Wait a turn for a neighbour to move, or chat to ask them to step aside.', events };
       }
       const fresh = options.filter((p) => !recent.has(`${p.x},${p.y}`));
       const pool = fresh.length ? fresh : options;
@@ -881,7 +881,7 @@ export function step(
 
     case 'plan':
       // plans are unrolled into single steps by the simulation before step() runs
-      return { ok: false, message: 'A plan is carried out one step at a time, not as a single step.', events };
+      return { ok: false, message: 'A plan cannot be a step of another plan. Choose a single action for each step instead.', events };
 
     default:
       return unhandledAction(action, events);
@@ -895,7 +895,7 @@ export function step(
  */
 function unhandledAction(action: never, events: ActionResult['events']): ActionResult {
   void action;
-  return { ok: false, message: 'Unknown action.', events };
+  return { ok: false, message: 'Unknown action. Choose one of the actions listed under "Actions you can take now", or wait.', events };
 }
 
 export function availableActions(snapshot: WorldSnapshot, agent: AgentState): string[] {
@@ -937,7 +937,7 @@ export function availableActions(snapshot: WorldSnapshot, agent: AgentState): st
       .filter((o) => o.kind === 'cube')
       .sort((a, b) => cheb(a) - cheb(b))[0];
     if (cube) {
-      acts.push(`- goto (${cube.pos.x},${cube.pos.y}): a strange cube, ${manhattan(cube.pos)} steps away (pick_up, then place or throw)`);
+      acts.push(`- goto (${cube.pos.x},${cube.pos.y}): a strange cube, ${manhattan(cube.pos)} steps away`);
     }
   }
   const here = territoryAt(agent.pos);

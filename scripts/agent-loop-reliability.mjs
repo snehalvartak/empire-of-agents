@@ -10,6 +10,8 @@
  *   - share of turns ending in wait            (target under 20%)
  *   - share of gather attempts that succeed    (target over 80%)
  *   - share of turns where thought and deed mismatch (target under 10%)
+ *   - plan mismatches, counted separately (informational; SPEC R8.4) — they
+ *     are also part of the mismatch share above
  *
  * Results are printed as a summary table and appended to
  * script-results/agent-loop.jsonl so runs can be compared over time.
@@ -59,13 +61,16 @@ const MODEL = arg('--model', 'openai/gpt-4o-mini');
 // sanitizing, and the retry on unparseable or mismatched replies
 const decide = (system, observation) => callBrainWithRetry(MODEL, system, observation);
 
-/** step() handles one action; a plan is unrolled step by step, as the app does.
- *  The turn counts as ok only if every step was. */
+/** step() handles one action; a plan is unrolled step by step, as the app does:
+ *  a failing step ends the plan there. The turn counts as ok only if every step was. */
 function runAction(snapshot, agentId, action) {
   if (action.type !== 'plan') return step(snapshot, agentId, action);
-  const results = action.data.steps.map((a) => step(snapshot, agentId, a));
-  const failed = results.find((r) => !r.ok);
-  return failed ?? results[results.length - 1];
+  let result;
+  for (const a of action.data.steps) {
+    result = step(snapshot, agentId, a);
+    if (!result.ok) break;
+  }
+  return result;
 }
 
 function describe(a) {
@@ -129,7 +134,7 @@ async function runExplorationScenario(ticks, model) {
     agent.island = territoryAt(agent.pos) ?? agent.island;
     agent.recentTiles = [...(agent.recentTiles ?? []), { ...agent.pos }].slice(-24);
 
-    turns.push({ actionType: action.type, ok: result.ok, mismatch: decided.mismatch, fallback: decided.fallback });
+    turns.push({ actionType: action.type, ok: result.ok, mismatch: decided.mismatch, planMismatch: decided.planMismatch, fallback: decided.fallback });
     console.log(
       `w${String(t).padStart(2)} ${describe(action).padEnd(22)} ` +
       `${result.ok ? 'ok  ' : 'FAIL'} ${result.message.slice(0, 70)}`
@@ -196,6 +201,7 @@ async function main() {
       thought: decided.thought,
       ok: result.ok,
       mismatch: decided.mismatch,
+      planMismatch: decided.planMismatch,
       fallback: decided.fallback,
     });
 
@@ -214,6 +220,8 @@ async function main() {
   const gatherOk = gathers.filter((x) => x.ok).length;
   const mismatches = turns.filter((x) => x.mismatch).length;
   const fallbacks = turns.filter((x) => x.fallback).length;
+  const plans = turns.filter((x) => x.actionType === 'plan').length;
+  const planMismatches = turns.filter((x) => x.planMismatch).length;
 
   const waitPct = Math.round((waits / total) * 100);
   const gatherPct = gathers.length ? Math.round((gatherOk / gathers.length) * 100) : 100;
@@ -227,6 +235,7 @@ async function main() {
   console.log(`gather success:   ${gatherPct}% of ${gathers.length} attempts  (target > 80%)  ${verdict(gatherPct > 80)}`);
   console.log(`thought mismatch: ${mismatchPct}%  (target < 10%)  ${verdict(mismatchPct < 10)}`);
   console.log(`fallback replies: ${fallbackPct}%  (informational)`);
+  console.log(`plan mismatches:  ${planMismatches} of ${plans} plans  (informational, counted within the thought mismatch above)`);
 
   console.log('\nScenario 2: exploration (road tile, nothing in reach)');
   console.log('-------');
@@ -243,6 +252,9 @@ async function main() {
   console.log(`wait rate:        ${expWaitPct}%  (target < 40%)  ${verdict(expWaitPct < 40)}`);
   console.log(`moved somewhere:  ${expMovePct}%  (target > 20%)  ${verdict(expMovePct > 20)}`);
   console.log(`thought mismatch: ${expMismatchPct}%  (target < 20%)  ${verdict(expMismatchPct < 20)}`);
+  console.log(
+    `plan mismatches:  ${expTurns.filter((x) => x.planMismatch).length} of ${expTurns.filter((x) => x.actionType === 'plan').length} plans  (informational)`
+  );
 
   const pass =
     waitPct < 20 && gatherPct > 80 && mismatchPct < 10 &&
@@ -259,6 +271,8 @@ async function main() {
     gather_success_rate: gatherPct,
     thought_mismatch_rate: mismatchPct,
     fallback_rate: fallbackPct,
+    plans,
+    plan_mismatches: planMismatches,
     exploration: {
       wait_rate: expWaitPct,
       moved_rate: expMovePct,

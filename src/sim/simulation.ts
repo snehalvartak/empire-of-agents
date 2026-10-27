@@ -432,6 +432,7 @@ class Simulation {
       island: e.island,
       type: e.type,
       message: e.message,
+      tick: this.snapshot.tick,
     });
   }
 
@@ -615,9 +616,40 @@ class Simulation {
     this.snapshot.tick++;
     await this.updateAgentRow(agent);
     await this.persistNeeds(agent);
+    await this.recordPosition(agent);
+    await this.maybeCheckpoint();
     this.pushHistory();
     this.emit();
     this.schedule();
+  }
+
+  private async recordPosition(agent: AgentState) {
+    await supabase.from('agent_positions').insert({
+      session_id: this.session?.id ?? null,
+      agent_id: agent.id,
+      tick: this.snapshot.tick,
+      x: agent.pos.x,
+      y: agent.pos.y,
+    });
+  }
+
+  /** Full world snapshot every 50 ticks, for replay seeking and thumbnails. */
+  private async maybeCheckpoint() {
+    if (this.snapshot.tick % 50 !== 0) return;
+    const s = this.snapshot;
+    await supabase.from('checkpoints').upsert(
+      {
+        session_id: this.session?.id ?? null,
+        tick: s.tick,
+        snapshot: {
+          tick: s.tick,
+          agents: s.agents,
+          objects: s.objects,
+          civ: s.civ,
+        },
+      },
+      { onConflict: 'session_id,tick' }
+    );
   }
 
   private pushHistory() {

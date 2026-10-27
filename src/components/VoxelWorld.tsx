@@ -13,11 +13,45 @@ import {
 
 const CENTER = 12;
 
-export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sayEvent?: { id: string; agentId: string; message: string } | null }) {
+export function VoxelWorld({
+  snapshot,
+  sayEvent,
+  focusAgentId,
+  bubblesOn,
+}: {
+  snapshot: WorldSnapshot;
+  sayEvent?: { id: string; agentId: string; message: string } | null;
+  focusAgentId?: string | null;
+  bubblesOn?: boolean;
+}) {
   const mountRef = useRef<HTMLDivElement>(null);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const rigsRef = useRef<Map<string, VillagerRig>>(new Map());
+  const focusRef = useRef({ x: CENTER, y: ISLAND_TOP + 1, z: CENTER, dist: 34 });
+  const bubblesOnRef = useRef(bubblesOn);
+  bubblesOnRef.current = bubblesOn;
+
+  // hotbar focus: tween the camera toward the selected villager
+  useEffect(() => {
+    if (!focusAgentId) return;
+    const started = performance.now();
+    const start = { ...focusRef.current };
+    let raf = 0;
+    const step = () => {
+      const rig = rigsRef.current.get(focusAgentId);
+      if (!rig) return;
+      const p = Math.min(1, (performance.now() - started) / 600);
+      const e = 1 - Math.pow(1 - p, 3);
+      focusRef.current.x = start.x + (rig.group.position.x - start.x) * e;
+      focusRef.current.z = start.z + (rig.group.position.z - start.z) * e;
+      focusRef.current.y = start.y + (ISLAND_TOP + 1 - start.y) * e;
+      focusRef.current.dist = start.dist + (14 - start.dist) * e;
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    step();
+    return () => cancelAnimationFrame(raf);
+  }, [focusAgentId]);
 
   useEffect(() => {
     if (!sayEvent) return;
@@ -52,6 +86,7 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
     scene.fog = new THREE.Fog('#0e1e30', 30, 70);
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 200);
+
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -146,7 +181,6 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
     // orbit camera: drag to rotate, scroll to zoom
     let angle = Math.PI * 0.25;
     let elevation = 0.9;
-    let dist = 34;
     let dragging = false;
     let lastX = 0;
     let lastY = 0;
@@ -176,7 +210,7 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
       if (pointers.size >= 2) {
         const [p1, p2] = [...pointers.values()];
         const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
-        if (pinchDist > 0) dist = Math.min(55, Math.max(5, dist - (d - pinchDist) * 0.06));
+        if (pinchDist > 0) focusRef.current.dist = Math.min(55, Math.max(5, focusRef.current.dist - (d - pinchDist) * 0.06));
         pinchDist = d;
         return;
       }
@@ -201,7 +235,7 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      dist = Math.min(55, Math.max(5, dist + e.deltaY * 0.02));
+      focusRef.current.dist = Math.min(55, Math.max(5, focusRef.current.dist + e.deltaY * 0.02));
     };
     el.addEventListener('pointerdown', onDown);
     el.addEventListener('pointermove', onMove);
@@ -223,12 +257,13 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
       elapsed += dt;
       const t = elapsed;
 
+      const f = focusRef.current;
       camera.position.set(
-        CENTER + dist * Math.cos(elevation) * Math.cos(angle),
-        ISLAND_TOP + 1 + dist * Math.sin(elevation) + 4,
-        CENTER + dist * Math.cos(elevation) * Math.sin(angle)
+        f.x + f.dist * Math.cos(elevation) * Math.cos(angle),
+        ISLAND_TOP + 1 + f.dist * Math.sin(elevation) + 4,
+        f.z + f.dist * Math.sin(elevation) * Math.sin(angle)
       );
-      camera.lookAt(CENTER, ISLAND_TOP + 1, CENTER);
+      camera.lookAt(f.x, f.y, f.z);
 
       // villagers: smooth walk to target + limb swing
       for (const [id, rig] of rigs) {
@@ -330,6 +365,10 @@ export function VoxelWorld({ snapshot, sayEvent }: { snapshot: WorldSnapshot; sa
       syncAgents();
       const snap = snapshotRef.current;
       for (const a of snap.agents) {
+        if (!bubblesOnRef.current) {
+          setThinking(a.id, false, a.color);
+          continue;
+        }
         setThinking(a.id, a.status === 'thinking', a.color);
         if (a.lastThought && lastThoughts.get(a.id) !== a.lastThought) {
           lastThoughts.set(a.id, a.lastThought);

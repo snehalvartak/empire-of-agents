@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
-  Archive, PlayCircle, Eye, ArrowLeft, Zap,
+  Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX,
 } from 'lucide-react';
+import { Panel, PixelButton, Badge } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
 import type { SessionRow } from '@/sim/simulation';
@@ -10,7 +11,7 @@ import { resetWorldOnDeploy } from '@/sim/reset';
 import { VoxelWorld } from '@/components/VoxelWorld';
 import { AgentAvatar } from '@/components/AgentAvatar';
 import type { TerritoryId, WorldSnapshot } from '@/sim/world';
-import { AGE_NAMES, TERRITORIES, seedObjects } from '@/sim/world';
+import { AGE_COSTS, AGE_NAMES, TERRITORIES, seedObjects } from '@/sim/world';
 
 interface EventRow {
   id: string;
@@ -99,6 +100,7 @@ export default function WorldApp() {
   const [speed, setSpeed] = useState(sim.speed);
   const [error, setError] = useState<string | null>(sim.error);
   const [tick, setTick] = useState(0);
+  const [feedFilter, setFeedFilter] = useState<string | null>(null);
   const [tab, setTab] = useState<'log' | 'memories' | 'minds' | 'replay'>('log');
   const [sayEvent, setSayEvent] = useState<{ id: string; agentId: string; message: string } | null>(null);
 
@@ -126,6 +128,16 @@ export default function WorldApp() {
   const [carryMemories, setCarryMemories] = useState(true);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [endedNotice, setEndedNotice] = useState<string | null>(null);
+  const [hotbarFocus, setHotbarFocus] = useState<string | null>(null);
+  const [bubblesOn, setBubblesOn] = useState(() => {
+    try {
+      return localStorage.getItem('bubblesOn') !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const [civDeltas, setCivDeltas] = useState<Record<string, number>>({});
+  const prevCivRef = useRef<CivRow | null>(null);
 
   useEffect(() => {
     void loadAll();
@@ -135,6 +147,16 @@ export default function WorldApp() {
       setError(sim.error);
       setTick(sim.snapshot.tick);
       setCiv({ ...sim.snapshot.civ });
+      const prev = prevCivRef.current;
+      if (prev && (prev.wood !== sim.snapshot.civ.wood || prev.food !== sim.snapshot.civ.food || prev.gold !== sim.snapshot.civ.gold || prev.stone !== sim.snapshot.civ.stone)) {
+        setCivDeltas({
+          wood: sim.snapshot.civ.wood - prev.wood,
+          food: sim.snapshot.civ.food - prev.food,
+          gold: sim.snapshot.civ.gold - prev.gold,
+          stone: sim.snapshot.civ.stone - prev.stone,
+        });
+      }
+      prevCivRef.current = { ...sim.snapshot.civ };
       setAgents(
         sim.snapshot.agents.map((a) => ({
           id: a.id,
@@ -178,6 +200,31 @@ export default function WorldApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // hotbar keys 1-9 select villagers
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      const n = Number(e.key);
+      if (!Number.isInteger(n) || n < 1 || n > 9) return;
+      const a = agents[n - 1];
+      if (a) setHotbarFocus((cur) => (cur === a.id ? null : a.id));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [agents]);
+
+  function toggleBubbles() {
+    setBubblesOn((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem('bubblesOn', next ? 'on' : 'off');
+      } catch {
+        /* private mode */
+      }
+      return next;
+    });
+  }
 
   async function loadAll() {
     await resetWorldOnDeploy();
@@ -359,6 +406,13 @@ export default function WorldApp() {
           <div className="flex items-center gap-2">
             <span className="mr-2 hidden text-xs text-amber-100/40 sm:block">tick {tick}</span>
             <button
+              onClick={toggleBubbles}
+              title={bubblesOn ? 'Speech bubbles on' : 'Speech bubbles off'}
+              className="rounded-md border border-amber-800/50 p-1.5 text-amber-200/70 hover:bg-amber-900/30"
+            >
+              {bubblesOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
+            </button>
+            <button
               onClick={() => setShowSettings(true)}
               className="flex items-center gap-1.5 rounded-lg border border-amber-800/50 px-3 py-1.5 text-xs text-amber-200 hover:bg-amber-900/30"
             >
@@ -411,20 +465,45 @@ export default function WorldApp() {
         </div>
       </header>
 
-      {/* resource bar */}
+      {/* resource bar with age progress and per-tick deltas */}
       <div className="border-b border-amber-900/40 bg-[#1c1610]/90">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-1 px-6 py-2 text-sm">
           <span className="font-serif text-sm font-bold tracking-wider text-amber-300">
             {AGE_NAMES[civ.age - 1]}
           </span>
+          {civ.age < 4 && (() => {
+            const cost = AGE_COSTS[civ.age];
+            const ratios = [
+              Math.min(1, civ.wood / Math.max(1, cost.wood)),
+              Math.min(1, civ.food / Math.max(1, cost.food)),
+              Math.min(1, civ.gold / Math.max(1, cost.gold)),
+            ];
+            const pct = Math.round((ratios.reduce((a, b) => a + b, 0) / 3) * 100);
+            return (
+              <span className="flex items-center gap-2" title={`Progress toward ${AGE_NAMES[civ.age]}`}>
+                <span className="h-1.5 w-24 overflow-hidden rounded-full bg-amber-950">
+                  <div className="h-full rounded-full bg-amber-500/80 transition-all duration-500" style={{ width: `${pct}%` }} />
+                </span>
+                <span className="text-[10px] text-amber-100/40">{pct}% to {AGE_NAMES[civ.age]}</span>
+              </span>
+            );
+          })()}
           <span className="h-4 w-px bg-amber-800/50" />
-          {(['wood', 'food', 'gold', 'stone'] as const).map((k) => (
-            <span key={k} className="flex items-center gap-1.5 text-amber-100/90">
-              <ResourceIcon kind={k} />
-              <span className="font-mono font-semibold">{civ[k]}</span>
-              <span className="text-xs capitalize text-amber-100/50">{k}</span>
-            </span>
-          ))}
+          {(['wood', 'food', 'gold', 'stone'] as const).map((k) => {
+            const d = civDeltas[k] ?? 0;
+            return (
+              <span key={k} className="flex items-center gap-1.5 text-amber-100/90">
+                <ResourceIcon kind={k} />
+                <span className="font-mono font-semibold">{civ[k]}</span>
+                <span className="text-xs capitalize text-amber-100/50">{k}</span>
+                {d !== 0 && (
+                  <span className={`text-[10px] font-bold ${d > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {d > 0 ? '▲' : '▼'}{Math.abs(d)}
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -455,8 +534,40 @@ export default function WorldApp() {
             </div>
           )}
 
-          {worldSnapshot && <VoxelWorld snapshot={worldSnapshot} sayEvent={viewing === 'live' ? sayEvent : null} />}
+          {worldSnapshot && (
+            <VoxelWorld
+              snapshot={worldSnapshot}
+              sayEvent={viewing === 'live' ? sayEvent : null}
+              focusAgentId={hotbarFocus}
+              bubblesOn={bubblesOn}
+            />
+          )}
           <p className="text-xs text-amber-100/40">Drag to orbit the world. Scroll or pinch to zoom.</p>
+
+          {/* villager hotbar: keys 1-9, click to focus the camera */}
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {agents.slice(0, 9).map((a, i) => (
+              <button
+                key={a.id}
+                onClick={() => setHotbarFocus((cur) => (cur === a.id ? null : a.id))}
+                title={`${a.name} — press ${i + 1}`}
+                className={`flex min-w-[76px] flex-col items-center gap-1 rounded-lg border-2 px-2 py-1.5 transition-colors ${
+                  hotbarFocus === a.id
+                    ? 'border-amber-400 bg-amber-900/40'
+                    : 'border-amber-900/40 bg-[#1c1610]/70 hover:bg-amber-900/20'
+                }`}
+              >
+                <AgentAvatar name={a.name} color={a.color} size={26} status={a.status} />
+                <span className="max-w-[68px] truncate text-[10px] text-amber-100/80">{a.name}</span>
+                <span className="text-[9px] font-bold text-amber-100/35">{i + 1}</span>
+              </button>
+            ))}
+            {agents.length === 0 && (
+              <span className="rounded-lg border border-amber-900/40 bg-[#1c1610]/70 px-4 py-3 text-xs text-amber-100/40">
+                The island is quiet. No villagers have set out yet.
+              </span>
+            )}
+          </div>
 
           {viewing === 'live' && (
             <div className="flex items-center gap-2 text-xs text-amber-100/60">
@@ -478,7 +589,7 @@ export default function WorldApp() {
           )}
 
           {/* villager roster */}
-          <div className="rounded-2xl border border-amber-900/40 bg-[#1c1610]/70 p-4">
+          <Panel className="p-4">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="font-serif text-sm font-bold tracking-wide text-amber-200">
                 {viewingArchived ? 'Villagers of that age' : `Villagers (${agents.length})`}
@@ -635,12 +746,12 @@ export default function WorldApp() {
                 </div>
               ))}
             </div>
-          </div>
+          </Panel>
         </div>
 
         {/* right column */}
         <div className="space-y-4">
-          <div className="rounded-2xl border border-amber-900/40 bg-[#1c1610]/70">
+          <Panel>
             <div className="flex border-b border-amber-900/40">
               <button
                 onClick={() => setTab('log')}
@@ -684,11 +795,29 @@ export default function WorldApp() {
               </button>
             </div>
             <div className="max-h-[560px] space-y-1.5 overflow-y-auto p-3">
-              {tab === 'log' &&
-                (events.length === 0 ? (
-                  <p className="p-2 text-sm text-amber-100/40">The chronicle is empty.</p>
-                ) : (
-                  events.map((e) => (
+              {tab === 'log' && (
+                <>
+                  <div className="flex flex-wrap gap-1 pb-1">
+                    {['all', 'gather', 'build', 'deposit', 'say', 'chat', 'advance_age', 'system'].map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setFeedFilter(f === 'all' ? null : f)}
+                        className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                          (f === 'all' && !feedFilter) || feedFilter === f
+                            ? 'border-amber-500/60 bg-amber-600/25 text-amber-200'
+                            : 'border-amber-900/40 bg-[#15100a]/60 text-amber-100/45 hover:text-amber-100/75'
+                        }`}
+                      >
+                        {f.replace('_', ' ')}
+                      </button>
+                    ))}
+                  </div>
+                  {events.length === 0 ? (
+                    <p className="p-2 text-sm text-amber-100/40">The chronicle is empty.</p>
+                  ) : (
+                    events
+                      .filter((e) => !feedFilter || e.type === feedFilter)
+                      .map((e) => (
                     <div key={e.id} className="rounded-lg px-3 py-2 text-sm hover:bg-amber-900/20">
                       <span
                         className={`mr-2 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
@@ -716,9 +845,16 @@ export default function WorldApp() {
                         {e.type.replace('_', ' ')}
                       </span>
                       <span className="text-amber-50/85">{e.message}</span>
+                      {typeof (e as { tick?: number }).tick === 'number' && (
+                        <span className="ml-2 text-[10px] text-amber-100/30">
+                          t{(e as { tick?: number }).tick}
+                        </span>
+                      )}
                     </div>
                   ))
-                ))}
+                  )}
+                </>
+              )}
               {tab === 'minds' && (
                 <div className="space-y-2">
                   {agents.length === 0 ? (
@@ -910,9 +1046,9 @@ export default function WorldApp() {
                   })
                 ))}
             </div>
-          </div>
+          </Panel>
 
-          <div className="rounded-2xl border border-amber-900/40 bg-[#1c1610]/70 p-4 text-xs leading-relaxed text-amber-100/50">
+          <Panel className="p-4 text-xs leading-relaxed text-amber-100/50">
             <p className="mb-2 font-serif text-sm font-bold text-amber-200">How this works</p>
             <p>
               Each villager is powered by a language model via OpenRouter. On its turn it observes
@@ -922,7 +1058,7 @@ export default function WorldApp() {
               starts a fresh founding. By default villagers remember their past selves across
               sessions — unless you start one amnesiac.
             </p>
-          </div>
+          </Panel>
         </div>
       </main>
 

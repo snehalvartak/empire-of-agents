@@ -4,16 +4,17 @@ import {
   MAX_VILLAGERS,
   STARTING_VILLAGERS,
   clearInbox,
+  findSpawnTile,
   islandFingerprint,
   nextIdFor,
-  observe,
   planSteps,
   runSteps,
   seedObjects,
   step,
   territoryAt,
 } from './world';
-import { callBrainWithRetry, systemPrompt } from './brain';
+import { callBrainWithRetry } from './brain';
+import { buildMindInput } from './mind';
 import { buildCheckpoint, restoreCheckpoint, withNewVillagerIds } from './checkpoint';
 import type { CheckpointBond, DepletedEntry } from './checkpoint';
 import {
@@ -26,6 +27,9 @@ import {
 } from './memory';
 import type { EraScope, MemoryRow } from './memory';
 import { pickNextActor } from './rotation';
+import { eventsForResult, planEndRow } from './chronicle';
+import { bondExchange, createBondWriter, recordBond } from './bonds';
+import type { Bond, BondExchange, PairRow } from './bonds';
 import { grantXp, sanitizeTraits } from './traits';
 import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, toIso } from './driver';
 
@@ -73,12 +77,7 @@ interface Goal {
   createdAt: number;
 }
 
-interface RelationshipRow {
-  withId: string;
-  withName: string;
-  strength: number;
-  lastMessage: string | null;
-}
+type RelationshipRow = Bond;
 
 function sanitizeGoals(raw: unknown): Goal[] {
   if (!Array.isArray(raw)) return [];
@@ -137,6 +136,8 @@ class Simulation {
   private depleted = new Map<string, number | null>();
   private forking = false;
   private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
+  /** Persists bond rows; a row that fails stays dirty and is retried on the next bond write (R7.1, bonds.ts). */
+  private bondWriter = createBondWriter((row) => this.persistBond(row));
   private actionHistory = new Map<string, Array<{ label: string; result: string }>>();
   private turnCounts = new Map<string, number>();
   private waitCounts = new Map<string, number>();
@@ -272,6 +273,7 @@ class Simulation {
     this.readOnly = false;
     this.driverNote = null;
     this.memoriesCache.clear();
+    this.bondWriter.clear();
     this.lastActorId = null;
     this.lastActorIndex = 0;
     this.history = [];
@@ -431,8 +433,9 @@ class Simulation {
     this.lastActorIndex = world.cursor.lastActorIndex;
     // Bonds: the checkpoint's strengths are this era's live values. The global relationships table is
     // deliberately not rewritten here; it is only the starting point for a new era (SPEC section 9) and
-    // converges on the first interaction, when bumpRelationship upserts the pair's row.
+    // converges on the first interaction, when recordBond upserts the pair's row.
     this.relationshipsCache.clear();
+    this.bondWriter.clear();
     for (const a of world.snapshot.agents) {
       a.relationships = (a.relationships ?? []).map((r) => ({ ...r }));
       this.relationshipsCache.set(a.id, new Map(a.relationships.map((r) => [r.withName, { ...r }] as const)));
@@ -631,6 +634,13 @@ class Simulation {
       this.emit();
       return;
     }
+    // a free tile in the chosen territory, never one a villager already stands on (SPEC section 7: one villager per tile)
+    const spawn = findSpawnTile(this.snapshot, a.island);
+    if (!spawn) {
+      this.error = `Every tile of that territory is taken. Choose another territory for the newcomer.`;
+      this.emit();
+      return;
+    }
     const { data, error } = await supabase
       .from('agents')
       .insert({
@@ -639,7 +649,7 @@ class Simulation {
         model: a.model,
         color: a.color,
         island: a.island,
-        position: { x: 2 + Math.floor(Math.random() * 5), y: 2 + Math.floor(Math.random() * 5) },
+        position: spawn,
         persona: a.persona,
         mood: 'curious',
         status: 'idle',
@@ -673,6 +683,7 @@ class Simulation {
     await this.endSession();
     if (this.readOnly) return; // another window drives the era: leave this watcher's view alone
     this.memoriesCache.clear();
+    this.bondWriter.clear();
     this.lastActorId = null;
     this.lastActorIndex = 0;
     this.snapshot = {
@@ -829,9 +840,8 @@ class Simulation {
     return [...map.values()].sort((x, y) => y.strength - x.strength);
   }
 
-  private async recordChat(from: AgentState, to: AgentState, message: string) {
-    await this.bumpRelationship(from, to, message);
-    await this.bumpRelationship(to, from, message);
+  private async recordChat(from: AgentState, to: AgentState, bond: BondExchange) {
+    await this.recordBond(from, to, bond);
     const { data: countRow } = await supabase
       .from('agents')
       .select('chat_count')
@@ -840,35 +850,39 @@ class Simulation {
     await supabase.from('agents').update({ chat_count: (countRow?.chat_count ?? 0) + 1 }).eq('id', from.id);
   }
 
-  private async bumpRelationship(a: AgentState, other: AgentState, lastMessage: string) {
-    let rels = this.relationshipsCache.get(a.id);
-    if (!rels) {
-      rels = new Map();
-      this.relationshipsCache.set(a.id, rels);
-    }
-    const existing = rels.get(other.name);
-    if (existing) {
-      existing.strength += 1;
-      existing.lastMessage = lastMessage;
-      // upsert, not update: in a new or forked era the pair of ids is new, and the first interaction
-      // is what writes the global row (it converges on the era's live value)
-      const pair = [a.id, other.id].sort();
-      await supabase
-        .from('relationships')
-        .upsert(
-          { a_id: pair[0], b_id: pair[1], strength: existing.strength, last_chat_at: new Date().toISOString(), session_id: this.session?.id ?? null },
-          { onConflict: 'a_id,b_id' }
-        );
-    } else {
-      rels.set(other.name, { withId: other.id, withName: other.name, strength: 1, lastMessage });
-      const pair = [a.id, other.id].sort();
-      const { error } = await supabase
-        .from('relationships')
-        .upsert(
-          { a_id: pair[0], b_id: pair[1], strength: 1, session_id: this.session?.id ?? null },
-          { onConflict: 'a_id,b_id' }
-        );
-      if (error) console.error('relationship upsert failed:', error.message);
+  /** Deepens the bond of both villagers in memory, then persists it (symmetric, retried on failure: bonds.ts, R7.1). */
+  private async recordBond(a: AgentState, b: AgentState, bond: BondExchange) {
+    await recordBond(
+      {
+        relsOf: (id) => {
+          let rels = this.relationshipsCache.get(id);
+          if (!rels) {
+            rels = new Map();
+            this.relationshipsCache.set(id, rels);
+          }
+          return rels;
+        },
+        writer: this.bondWriter,
+        sessionId: this.session?.id ?? null,
+        nowIso: () => new Date().toISOString(),
+      },
+      a,
+      b,
+      bond.delta,
+      bond.lastMessage
+    );
+  }
+
+  /**
+   * One upsert, not an update: in a new or forked era the pair of ids is new, and the first interaction
+   * is what writes the global row (it converges on the era's live value). Rejects on failure so the
+   * writer keeps the pair dirty.
+   */
+  private async persistBond(row: PairRow) {
+    const { error } = await supabase.from('relationships').upsert(row, { onConflict: 'a_id,b_id' });
+    if (error) {
+      console.error('relationship upsert failed:', error.message);
+      throw new Error(error.message);
     }
   }
 
@@ -1162,10 +1176,9 @@ class Simulation {
 
     const memories = await this.getMemories(agent.id, agent.name);
     agent.relationships = await this.getRelationships(agent);
-    const sys = systemPrompt(agent, memories);
-    const obs = observe(this.snapshot, agent, this.actionHistory.get(agent.id) ?? []);
+    const mind = buildMindInput(agent, this.snapshot, memories, this.actionHistory.get(agent.id) ?? []);
 
-    const decision = await callBrainWithRetry(agent.model, sys, obs);
+    const decision = await callBrainWithRetry(agent.model, mind.system, mind.observation);
 
     // what was spoken to this villager has now been heard — exactly once (R7.4)
     clearInbox(agent, this.snapshot.agents.find((a) => a.id === agent.id));
@@ -1203,14 +1216,8 @@ class Simulation {
       return result;
     });
     // a failed step ends the plan there; its plain-language reason is already in the chronicle
-    if (endedAt !== null && endedAt < steps.length - 1) {
-      await this.logEvent({
-        agent_id: agent.id,
-        island: agent.island,
-        type: 'system',
-        message: `${agent.name}'s plan ends at step ${endedAt + 1} of ${steps.length}; the remaining steps are not attempted.`,
-      });
-    }
+    const planEnd = planEndRow(agent, endedAt, steps.length);
+    if (planEnd) await this.logEvent(planEnd);
     this.actionHistory.set(agent.id, hist.slice(0, 3));
 
     agent.status = 'idle';
@@ -1242,12 +1249,11 @@ class Simulation {
     agent.island = territoryAt(agent.pos) ?? agent.island;
     if (this.readOnly) return result; // lease lost mid-turn: no persistence from here (R7.6)
 
-    await this.logEvent({
-      agent_id: agent.id,
-      island: agent.island,
-      type: action.type,
-      message: `${agent.name}: ${result.message}`,
-    });
+    // every result is chronicled, success or failure, together with a lost chat and the thought (chronicle.ts, R3.3)
+    const chatTarget = result.chat ? this.snapshot.agents.find((a) => a.id === result.chat!.withId) : undefined;
+    for (const row of eventsForResult(agent, action, result, { thought, isFirst, target: chatTarget })) {
+      await this.logEvent(row);
+    }
 
     // every memory row carries the era and the tick it was written at (SPEC section 8)
     const stamp = { session_id: this.session?.id ?? null, tick: memoryTick(this.snapshot.tick) };
@@ -1335,16 +1341,8 @@ class Simulation {
       agent.lastBubble = `to ${result.chat!.withName}: "${result.chat!.message}"`;
       const target = this.snapshot.agents.find((a) => a.id === result.chat!.withId);
       if (target) {
-        await this.recordChat(agent, target, result.chat!.message);
+        await this.recordChat(agent, target, bondExchange(result)!);
         target.lastBubble = `${agent.name}: "${result.chat!.message}"`;
-        if (result.chat!.dropped) {
-          await this.logEvent({
-            agent_id: target.id,
-            island: target.island,
-            type: 'system',
-            message: `${target.name} had too many unheard words pending; ${result.chat!.dropped.fromName}'s "${result.chat!.dropped.message.slice(0, 80)}" was lost.`,
-          });
-        }
       }
     } else if (action.type === 'gift' && result.gift) {
       agent.mood = 'generous';
@@ -1352,9 +1350,8 @@ class Simulation {
       const target = this.snapshot.agents.find((a) => a.id === result.gift!.withId);
       if (target) {
         target.lastBubble = `${agent.name} gave me ${result.gift.item}!`;
-        // a gift deepens the bond twice as much as a chat
-        await this.bumpRelationship(agent, target, `gave ${result.gift.item}`);
-        await this.bumpRelationship(target, agent, `received ${result.gift.item}`);
+        // a gift deepens the bond twice as much as a chat (BOND_DELTA, +2 each way)
+        await this.recordBond(agent, target, bondExchange(result)!);
       }
     } else if (action.type === 'eat') {
       agent.mood = 'fed';
@@ -1381,15 +1378,7 @@ class Simulation {
       agent.mood = 'curious';
     }
 
-    if (thought && isFirst) {
-      agent.lastThought = thought;
-      await this.logEvent({
-        agent_id: agent.id,
-        island: agent.island,
-        type: 'thought',
-        message: `${agent.name} thinks: ${thought}`,
-      });
-    }
+    if (thought && isFirst) agent.lastThought = thought;
 
     // self-evolution: train an agent-invented ability (fallbacks from other deeds)
     const fallbackMap: Record<string, string> = {

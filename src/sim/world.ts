@@ -350,6 +350,27 @@ function hasLandPath(snapshot: WorldSnapshot, agent: AgentState, target: GridPos
   return false;
 }
 
+/**
+ * A free tile for a villager joining the running world (SPEC section 7, "Joining"): inside `territory`,
+ * on land, and not under another villager (one villager per tile). Tiles without an object are preferred
+ * so the newcomer does not appear on top of a tree. Null when every tile of the territory is taken.
+ */
+export function findSpawnTile(snapshot: WorldSnapshot, territory: TerritoryId, random: () => number = Math.random): GridPos | null {
+  const def = TERRITORIES.find((t) => t.id === territory);
+  if (!def) return null;
+  const free: GridPos[] = [];
+  for (let y = def.offset.y; y < def.offset.y + def.size; y++) {
+    for (let x = def.offset.x; x < def.offset.x + def.size; x++) {
+      const p = { x, y };
+      if (x >= GRID_SIZE || y >= GRID_SIZE || !canStand(p)) continue;
+      if (!snapshot.agents.some((a) => a.pos.x === x && a.pos.y === y)) free.push(p);
+    }
+  }
+  const clear = free.filter((p) => !tileOccupied(snapshot, p));
+  const pool = clear.length ? clear : free;
+  return pool.length ? pool[Math.floor(random() * pool.length)] : null;
+}
+
 function tileOccupied(snapshot: WorldSnapshot, p: GridPos): boolean {
   return snapshot.objects.some((o) => o.pos.x === p.x && o.pos.y === p.y);
 }
@@ -657,8 +678,9 @@ export function step(
             if (canStand(p) && !tileOccupied(snapshot, p) && !snapshot.agents.some((a) => a.pos.x === p.x && a.pos.y === p.y)) spots.push(p);
           }
         }
+        // two different tiles: a spot, once used, is not drawn again (no two cubes stacked on one tile)
         for (let i = 0; i < Math.min(2, spots.length); i++) {
-          const p = spots[Math.floor(Math.random() * spots.length)];
+          const p = spots.splice(Math.floor(Math.random() * spots.length), 1)[0];
           const id = allocId(snapshot, 'cube');
           snapshot.objects.push({ id, territory: territoryAt(p) ?? agent.island, pos: p, kind: 'cube', builtBy: 'the Standing Rock' });
           spawned.push({ id, pos: p, by: 'the Standing Rock' });

@@ -12,6 +12,8 @@
     "preview": "vite preview",
     "reset-world": "node scripts/reset-world.mjs",
     "harness": "node scripts/agent-loop-reliability.mjs",
+    "harness:smoke": "node scripts/harness-smoke.mjs",
+    "check:migrations": "bash scripts/check-migrations.sh",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "pretest": "npm run manifest",
     "test": "vitest run"

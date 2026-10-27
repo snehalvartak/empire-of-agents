@@ -44,8 +44,15 @@ function env(key) {
   return match[1].trim().replace(/^["']|["']$/g, '');
 }
 
-const SUPABASE_URL = env('VITE_SUPABASE_URL');
-const ANON_KEY = env('VITE_SUPABASE_ANON_KEY');
+// Optional overrides (used by `npm run harness:smoke` to point the harness at a stub server):
+//   HARNESS_SUPABASE_URL + HARNESS_SUPABASE_ANON_KEY  both set -> .env is not read
+//   HARNESS_OUT_DIR                                   where agent-loop.jsonl is appended
+// Unset, behavior is exactly as before: .env at the repo root, results in <root>/script-results.
+const overrideUrl = process.env.HARNESS_SUPABASE_URL;
+const overrideKey = process.env.HARNESS_SUPABASE_ANON_KEY;
+const useOverride = Boolean(overrideUrl && overrideKey);
+const SUPABASE_URL = useOverride ? overrideUrl : env('VITE_SUPABASE_URL');
+const ANON_KEY = useOverride ? overrideKey : env('VITE_SUPABASE_ANON_KEY');
 // outside Vite there is no import.meta.env, so hand the real brain its endpoint
 configureBrain({ supabaseUrl: SUPABASE_URL, anonKey: ANON_KEY });
 
@@ -260,7 +267,7 @@ async function main() {
     waitPct < 20 && gatherPct > 80 && mismatchPct < 10 &&
     expWaitPct < 40 && expMovePct > 20 && expMismatchPct < 20;
 
-  const outDir = `${root}script-results`;
+  const outDir = process.env.HARNESS_OUT_DIR || `${root}script-results`;
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
   const record = {
     date: new Date().toISOString(),
@@ -281,7 +288,7 @@ async function main() {
     pass,
   };
   appendFileSync(`${outDir}/agent-loop.jsonl`, JSON.stringify(record) + '\n');
-  console.log('\nResult saved to script-results/agent-loop.jsonl');
+  console.log(`\nResult saved to ${process.env.HARNESS_OUT_DIR ? `${outDir}/` : 'script-results/'}agent-loop.jsonl`);
 }
 
 await main();

@@ -393,6 +393,28 @@ function canStand(p: GridPos): boolean {
   return territoryAt(p) !== null || isRoad(p);
 }
 
+/** Breadth-first search over walkable land (territories and roads); other villagers block, objects do not. */
+function hasLandPath(snapshot: WorldSnapshot, agent: AgentState, target: GridPos): boolean {
+  const key = (p: GridPos) => p.y * GRID_SIZE + p.x;
+  const blocked = (p: GridPos) =>
+    !canStand(p) || snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === p.x && a.pos.y === p.y);
+  if (blocked(target)) return false;
+  const seen = new Set<number>([key(agent.pos)]);
+  const queue: GridPos[] = [agent.pos];
+  for (let i = 0; i < queue.length; i++) {
+    const cur = queue[i];
+    if (cur.x === target.x && cur.y === target.y) return true;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const next = { x: cur.x + dx, y: cur.y + dy };
+      if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE) continue;
+      if (seen.has(key(next)) || blocked(next)) continue;
+      seen.add(key(next));
+      queue.push(next);
+    }
+  }
+  return false;
+}
+
 function tileOccupied(snapshot: WorldSnapshot, p: GridPos): boolean {
   return snapshot.objects.some((o) => o.pos.x === p.x && o.pos.y === p.y);
 }
@@ -454,28 +476,10 @@ export function step(
       if (!territoryAt(target) && !isRoad(target)) {
         return { ok: false, message: 'That point lies in open water. Choose a point on land, or follow the roads between the territories.', events };
       }
-      let steps = 0;
-      let cur = { ...agent.pos };
-      while ((cur.x !== x || cur.y !== y) && steps < GRID_SIZE * 3) {
-        const dx = Math.sign(x - cur.x);
-        const dy = Math.sign(y - cur.y);
-        const candidates: GridPos[] = [];
-        if (dx !== 0) candidates.push({ x: cur.x + dx, y: cur.y });
-        if (dy !== 0) candidates.push({ x: cur.x, y: cur.y + dy });
-        let moved = false;
-        for (const c of candidates) {
-          if (
-            (territoryAt(c) || isRoad(c)) &&
-            !snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === c.x && a.pos.y === c.y)
-          ) {
-            cur = c;
-            moved = true;
-            break;
-          }
-        }
-        if (!moved) return { ok: false, message: 'No clear path to that point — open water or another villager is in the way. Try a nearer point, or step aside and go around.', events };
-        steps++;
+      if (!hasLandPath(snapshot, agent, target)) {
+        return { ok: false, message: 'No clear path to that point — open water or another villager is in the way. Try a nearer point, or step aside and go around.', events };
       }
+      const cur = target;
       const now = territoryAt(cur);
       const prev = territoryAt(agent.pos);
       agent.pos = cur;
@@ -689,15 +693,22 @@ export function step(
       const range = Math.max(Math.abs(dx), Math.abs(dy));
       let cur = { ...agent.pos };
       let flew = 0;
+      let rock: WorldObject | undefined;
       for (let i = 0; i < range; i++) {
         const next = { x: cur.x + ux, y: cur.y + uy };
-        if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE || !canStand(next) || tileOccupied(snapshot, next)) break;
+        if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE || !canStand(next)) break;
+        // the rock occupies its tile, so a cube that reaches it strikes it instead of stopping short
+        rock = snapshot.objects.find((o) => o.kind === 'rock' && o.pos.x === next.x && o.pos.y === next.y);
+        if (rock) {
+          flew++;
+          break;
+        }
+        if (tileOccupied(snapshot, next)) break;
         cur = next;
         flew++;
       }
       if (flew === 0) return { ok: false, message: 'The way is blocked — the cube drops back into your hands.', events };
       agent.inventory = agent.inventory.filter((i) => i !== 'cube');
-      const rock = snapshot.objects.find((o) => o.kind === 'rock' && o.pos.x === cur.x && o.pos.y === cur.y);
       if (rock) {
         const spawned: NonNullable<ActionResult['spawned']> = [];
         const spots: GridPos[] = [];

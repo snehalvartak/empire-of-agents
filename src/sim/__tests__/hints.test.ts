@@ -114,8 +114,38 @@ describe('H2 / R5.2 / R5.4 — hints', () => {
     expect(observe(snap, agent, [])).toContain('Carrying: nothing.');
   });
 
-  // Known gap, left visible rather than hidden: goto walks greedily (x first, then y) instead of
-  // pathfinding, so from e.g. a road tile east of the forest a hinted goto into the forest is refused
-  // ("No clear path"). 27 of 895 goto hints over every walkable tile with empty hands.
-  it.todo('R5.2: every goto hint is accepted by the handler from the tile it was offered on');
+  it('R5.2: every goto hint is accepted by the handler from the tile it was offered on', () => {
+    const refused: string[] = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (territoryAt({ x, y }) === null && !isRoad({ x, y })) continue;
+        const { snap, agent } = world({ x, y }, []);
+        for (const t of gotoTargets(availableActions(snap, agent))) {
+          // each hint is tried on a fresh world so one goto cannot disturb the next
+          const fresh = world({ x, y }, []);
+          const result = step(fresh.snap, fresh.agent.id, { type: 'goto', data: { x: t.x, y: t.y } });
+          if (!result.ok) refused.push(`(${x},${y}) -> (${t.x},${t.y}): ${result.message}`);
+        }
+      }
+    }
+    expect(refused).toEqual([]);
+  });
+
+  it('goto carries a villager from the east road to a forest tile', () => {
+    const { snap, agent } = world({ x: 16, y: 6 }, []);
+    const result = step(snap, agent.id, { type: 'goto', data: { x: 2, y: 2 } });
+    expect(result.ok).toBe(true);
+    expect(agent.pos).toEqual({ x: 2, y: 2 });
+  });
+
+  it('goto still refuses a target that is open water, and one a villager stands on', () => {
+    const water = world({ x: 7, y: 6 }, []);
+    expect(step(water.snap, 'a', { type: 'goto', data: { x: 15, y: 15 } }).ok).toBe(false);
+    const other = mkAgent('b', 'Bramble', 9, 6);
+    const crowded = world({ x: 7, y: 6 }, []);
+    crowded.snap.agents.push(other);
+    const blocked = step(crowded.snap, 'a', { type: 'goto', data: { x: 9, y: 6 } });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.message).toContain('No clear path');
+  });
 });

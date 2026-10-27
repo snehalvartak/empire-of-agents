@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import type { ActionInput, AgentState, CivState, TerritoryId, WorldObject, WorldSnapshot } from './world';
-import { isRoad, observe, seedObjects, step, territoryAt } from './world';
+import { nextIdFor, observe, seedObjects, step, territoryAt } from './world';
 import { callBrainWithRetry, systemPrompt } from './brain';
 import { grantXp, sanitizeTraits } from './traits';
 
@@ -69,6 +69,7 @@ class Simulation {
     agents: [],
     objects: [],
     civ: { wood: 0, food: 0, gold: 0, stone: 0, age: 1 },
+    nextId: 1,
   };
   history: WorldSnapshot[] = [];
   running = false;
@@ -79,7 +80,7 @@ class Simulation {
   private listeners = new Set<Listener>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private memoriesCache = new Map<string, string[]>();
-  private pendingRespawns = new Map<string, { id: string; respawnAt: number }>();
+  private pendingRespawns = new Map<string, { id: string; respawnTick: number }>();
   private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
   private actionHistory = new Map<string, Array<{ label: string; result: string }>>();
   private turnCounts = new Map<string, number>();
@@ -194,6 +195,7 @@ class Simulation {
       agents: [],
       objects: seedObjects(),
       civ: { wood: 0, food: 0, gold: 0, stone: 0, age: 1 },
+      nextId: 1,
     };
     this.emit();
     await this.resumeOrCreateSession();
@@ -298,17 +300,22 @@ class Simulation {
       builtBy: r.built_by,
     }));
 
-    // depleted seeds: mines taken this session, plus animals not yet respawned
-    const now = Date.now();
+    // depleted seeds: mines taken this session (null respawn_tick = permanent),
+    // plus animals whose due-tick is still ahead of the tick we load at
+    const loadedTick = 0;
     const { data: depletedRows } = await supabase
       .from('depleted_objects')
       .select('*')
       .eq('session_id', sid);
-    const depletedIds = new Set(
-      (depletedRows ?? [])
-        .filter((r) => !r.respawn_at || new Date(r.respawn_at).getTime() > now)
-        .map((r) => r.id as string)
+    const stillDepleted = (depletedRows ?? []).filter(
+      (r) => r.respawn_tick == null || (r.respawn_tick as number) > loadedTick
     );
+    const depletedIds = new Set(stillDepleted.map((r) => r.id as string));
+    this.pendingRespawns.clear();
+    for (const r of stillDepleted) {
+      if (r.respawn_tick == null) continue;
+      this.pendingRespawns.set(`${sid}:${r.id}`, { id: r.id as string, respawnTick: r.respawn_tick as number });
+    }
     const seeds = seedObjects().filter((o) => !depletedIds.has(o.id));
 
     const agents: AgentState[] = (agentRows ?? []).map((row) => ({
@@ -329,11 +336,13 @@ class Simulation {
     }));
     await this.hydrateRelationships(agents);
 
+    const objects = [...seeds, ...builtStructures];
     this.snapshot = {
-      tick: 0,
+      tick: loadedTick,
       agents,
-      objects: [...seeds, ...builtStructures],
+      objects,
       civ,
+      nextId: nextIdFor(objects),
     };
     this.history = [];
     this.pushHistory();
@@ -397,6 +406,7 @@ class Simulation {
       agents: [],
       objects: seedObjects(),
       civ: { wood: 0, food: 0, gold: 0, stone: 0, age: 1 },
+      nextId: 1,
     };
     this.history = [];
     this.emit();
@@ -673,6 +683,7 @@ class Simulation {
           agents: s.agents,
           objects: s.objects,
           civ: s.civ,
+          nextId: s.nextId,
         },
       },
       { onConflict: 'session_id,tick' }
@@ -686,15 +697,16 @@ class Simulation {
       agents: s.agents.map((a) => ({ ...a, pos: { ...a.pos } })),
       objects: s.objects.map((o) => ({ ...o, pos: { ...o.pos } })),
       civ: { ...s.civ },
+      nextId: s.nextId,
     });
     if (this.history.length > 400) this.history.shift();
   }
 
   /** Gathered animals quietly return to their herds once their time is up. */
   private respawnAnimals() {
-    const now = Date.now();
+    const now = this.snapshot.tick;
     for (const [key, row] of this.pendingRespawns) {
-      if (now < row.respawnAt) continue;
+      if (now < row.respawnTick) continue;
       const seed = seedObjects().find((o) => o.id === row.id);
       if (seed && !this.snapshot.objects.some((o) => o.pos.x === seed.pos.x && o.pos.y === seed.pos.y)) {
         this.snapshot.objects.push(seed);
@@ -855,18 +867,15 @@ class Simulation {
 
     // persist depleted mines and gathered animals (animals return later)
     if (result.depleted) {
-      const respawnAt = result.depleted.respawnAt
-        ? new Date(result.depleted.respawnAt).toISOString()
-        : null;
       await supabase.from('depleted_objects').upsert({
         id: result.depleted.id,
         session_id: this.session?.id ?? null,
-        respawn_at: respawnAt,
+        respawn_tick: result.depleted.respawnTick,
       });
-      if (result.depleted.respawnAt) {
+      if (result.depleted.respawnTick !== null) {
         this.pendingRespawns.set(`${this.session?.id ?? ''}:${result.depleted.id}`, {
           id: result.depleted.id,
-          respawnAt: result.depleted.respawnAt,
+          respawnTick: result.depleted.respawnTick,
         });
       }
     }

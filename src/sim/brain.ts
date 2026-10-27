@@ -1,5 +1,5 @@
-import type { ActionInput, AgentState, WorldSnapshot } from './world.ts';
-import { AGE_COSTS, AGE_NAMES, BUILD_COSTS, TERRITORIES, observe } from './world.ts';
+import type { ActionInput, AgentState } from './world.ts';
+import { AGE_COSTS, AGE_NAMES, BUILD_COSTS, TERRITORIES } from './world.ts';
 import { normalizeTraitName, type TraitMap } from './traits.ts';
 
 const EDGE_URL = `${import.meta.env?.VITE_SUPABASE_URL ?? ''}/functions/v1/agent-brain`;

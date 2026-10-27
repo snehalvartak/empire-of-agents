@@ -49,8 +49,11 @@ export interface TerritoryDef {
 export const ANIMAL_KINDS = ['deer', 'boar', 'sheep'] as const;
 export type AnimalKind = (typeof ANIMAL_KINDS)[number];
 
-/** How long a gathered animal takes to return to the wild. */
-export const ANIMAL_RESPAWN_MS = 10 * 60 * 1000;
+/**
+ * How long a gathered animal takes to return to the wild, in world ticks (R5.1: never wall-clock).
+ * 170 ticks is roughly the old 10 minutes at the default 3.5s per tick.
+ */
+export const ANIMAL_RESPAWN_TICKS = 170;
 
 export const TERRITORIES: TerritoryDef[] = [
   {
@@ -191,6 +194,25 @@ export interface WorldSnapshot {
   agents: AgentState[];
   objects: WorldObject[];
   civ: CivState;
+  /** Per-era counter for ids of built structures and cubes (R5.1: never the wall clock). */
+  nextId: number;
+}
+
+/** Safe starting value for `nextId` given existing objects: one past the highest built_/cube_ id. */
+export function nextIdFor(objects: WorldObject[]): number {
+  let max = 0;
+  for (const o of objects) {
+    const m = /^(?:built|cube)_(\d+)/.exec(o.id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max + 1;
+}
+
+/** Takes the next id for a built structure or cube from the snapshot's counter. */
+function allocId(snapshot: WorldSnapshot, prefix: 'built' | 'cube'): string {
+  const n = Math.max(1, snapshot.nextId || 1);
+  snapshot.nextId = n + 1;
+  return `${prefix}_${n}`;
 }
 
 export type ActionInput =
@@ -297,7 +319,7 @@ export interface ActionResult {
   message: string;
   events: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
   memory?: { kind: 'semantic' | 'episodic' | 'discovery'; content: string };
-  depleted?: { id: string; respawnAt: number | null };
+  depleted?: { id: string; respawnTick: number | null };
   newGoal?: string;
   civDelta?: Partial<CivState>;
   civAge?: number;
@@ -460,10 +482,10 @@ export function step(
       let depleted: ActionResult['depleted'];
       if (obj.kind === 'gold_mine' || obj.kind === 'stone_mine') {
         snapshot.objects = snapshot.objects.filter((o) => o.id !== obj.id);
-        depleted = { id: obj.id, respawnAt: null };
+        depleted = { id: obj.id, respawnTick: null };
       } else if ((ANIMAL_KINDS as readonly string[]).includes(obj.kind)) {
         snapshot.objects = snapshot.objects.filter((o) => o.id !== obj.id);
-        depleted = { id: obj.id, respawnAt: Date.now() + ANIMAL_RESPAWN_MS };
+        depleted = { id: obj.id, respawnTick: snapshot.tick + ANIMAL_RESPAWN_TICKS };
       }
       agent.inventory.push(res);
       return {
@@ -533,7 +555,7 @@ export function step(
       civ.wood -= cost.wood;
       civ.stone -= cost.stone;
       civ.gold -= cost.gold;
-      const builtId = `built_${Date.now()}`;
+      const builtId = allocId(snapshot, 'built');
       snapshot.objects.push({
         id: builtId,
         territory: agent.island,
@@ -607,7 +629,7 @@ export function step(
         return { ok: false, message: 'Something already stands on that tile. Choose an empty one.', events };
       }
       agent.inventory = agent.inventory.filter((i) => i !== 'cube');
-      const id = `cube_${Date.now()}`;
+      const id = allocId(snapshot, 'cube');
       snapshot.objects.push({ id, territory: territoryAt(t) ?? agent.island, pos: t, kind: 'cube', builtBy: agent.name });
       return {
         ok: true,
@@ -648,7 +670,7 @@ export function step(
         }
         for (let i = 0; i < Math.min(2, spots.length); i++) {
           const p = spots[Math.floor(Math.random() * spots.length)];
-          const id = `cube_${Date.now()}_${i}`;
+          const id = allocId(snapshot, 'cube');
           snapshot.objects.push({ id, territory: territoryAt(p) ?? agent.island, pos: p, kind: 'cube', builtBy: 'the Standing Rock' });
           spawned.push({ id, pos: p, by: 'the Standing Rock' });
         }
@@ -659,7 +681,7 @@ export function step(
           spawned,
         };
       }
-      const id = `cube_${Date.now()}`;
+      const id = allocId(snapshot, 'cube');
       snapshot.objects.push({ id, territory: territoryAt(cur) ?? agent.island, pos: cur, kind: 'cube', builtBy: agent.name });
       return {
         ok: true,
@@ -834,7 +856,7 @@ export function availableActions(snapshot: WorldSnapshot, agent: AgentState): st
   // exploration: the Standing Rock, strange cubes, the roads, and unvisited ground
   const rock = snapshot.objects.find((o) => o.kind === 'rock');
   if (rock && cheb(rock) > 1) {
-    acts.push(`- goto (${rock.pos.x},${rock.pos.y}): the Standing Rock, ${manhattan(rock.pos)} steps away — rumor says it reacts to thrown cubes`);
+    acts.push(`- goto (${rock.pos.x},${rock.pos.y}): the Standing Rock, ${manhattan(rock.pos)} steps away`);
   }
   if (!agent.inventory.includes('cube')) {
     const cube = snapshot.objects

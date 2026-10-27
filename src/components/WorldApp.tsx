@@ -3,10 +3,12 @@ import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
   Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn, Lightbulb, Music,
 } from 'lucide-react';
-import { Timeline, Discoveries, detectKeyMoments, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
-import { useReplayPlayer, ReplayControls, type ReplayCheckpoint } from '@/components/ReplayPlayer';
+import { Timeline, Discoveries, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
+import { ReplayControls } from '@/components/ReplayPlayer';
+import { useReplayPlayer, type ReplayCheckpoint } from '@/components/replay';
+import { detectKeyMoments } from '@/components/paperUtils';
 import { useHeatmap } from '@/components/Heatmap';
-import { Panel, PixelButton, Badge } from '@/components/ui/Pixel';
+import { Panel } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
 import type { SessionRow } from '@/sim/simulation';
@@ -329,6 +331,7 @@ export default function WorldApp() {
       civ: civRow
         ? { wood: civRow.wood, food: civRow.food, gold: civRow.gold, stone: civRow.stone, age: civRow.age }
         : { wood: s.wood ?? 0, food: s.food ?? 0, gold: s.gold ?? 0, stone: s.stone ?? 0, age: s.age ?? 1 },
+      nextId: 1,
     });
     setViewing(s.id);
     setInspectAgent(null);
@@ -409,7 +412,7 @@ export default function WorldApp() {
   const replayCiv = sim.history.length ? sim.history[Math.min(replayTick, sim.history.length - 1)].civ : null;
 
   const replay = useReplayPlayer(checkpoints, viewing !== 'live' && checkpoints.length > 0);
-  const heatTiles = useHeatmap(heatRows, agents.map((a) => ({ id: a.id, name: a.name })));
+  const heatTiles = useHeatmap(heatRows);
   const viewingArchived = viewing !== 'live' ? sessions.find((s) => s.id === viewing) ?? null : null;
   const replayActive = viewingArchived !== null && checkpoints.length > 0;
   const worldSnapshot = replayActive && replay.current ? replay.current.snapshot : viewingArchived ? archivedSnapshot : sim.snapshot;

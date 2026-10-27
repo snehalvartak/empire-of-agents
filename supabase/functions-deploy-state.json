@@ -4,6 +4,10 @@
     "agent-brain": {
       "hasChanged": false,
       "hash": "f137bdd87aa56ab46fe6feb42630d801d3c3b948d56e30ccec3ab9fdc8333ce0"
+    },
+    "settings-key": {
+      "hasChanged": false,
+      "hash": "b05c31e09a4e17a41c04bc920585b4e2892ea48fcbdf0f990c9f78dc5db29683"
     }
   }
 }

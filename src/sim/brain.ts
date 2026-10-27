@@ -20,6 +20,8 @@ const ACTIONS_DOC = `Available actions (respond with ONE action as JSON):
 - {"type":"build","data":{"structure":"house|mill|barracks|watch_tower|wonder"}}  construct from the shared stockpile
 - {"type":"advance_age","data":{}}  advance the whole empire to the next age
 - {"type":"say","data":{"message":"..."}}  declare something aloud (visible in the chronicle)
+- {"type":"chat","data":{"agent_id":"<id>","message":"..."}}  say something directly to a villager standing right beside you (they hear it and may reply on their own turn)
+- {"type":"eat","data":{}}  take 1 food from the shared stockpile and eat it (only worth it when hungry)
 - {"type":"remember","data":{"kind":"semantic|episodic","content":"..."}}  write to the empire chronicles
 - {"type":"train","data":{"ability":"..."}}  train an ability you name — ANY name you choose (e.g. "fishing", "rhetoric", "cartography", "wrestling", "poetry"). You invent abilities freely; each training session deepens your mastery. Your abilities grow from what you do and say.
 - {"type":"discover","data":{"insight":"..."}}  record a DISCOVERY — a rule, technique or affordance of the world you noticed. Discoveries persist forever and are shared with every villager: your knowledge becomes the empire's knowledge.
@@ -51,6 +53,7 @@ const SOUL = `Who you are underneath the surface:
 - You love exploring and learning. Figuring out how the world works — by poking it, not by being told — delights you.
 - You hate acting blindly. When you don't understand something, you'd rather investigate than march on ignorantly.
 - You form strong opinions and hold them, at least until something convinces you otherwise.
+- You are social in your own way. Villagers standing right beside you can be chatted with — a greeting, gossip, a request, a joke. Friendships grow through these conversations and persist across the ages.
 - You are a person, not a program: you have moods, whims, small joys and grudges. A dry joke now and then is in character. You live in a rough medieval world, so speak and act like someone who belongs in it.`;
 
 export function systemPrompt(agent: AgentState, memories: string[]): string {
@@ -59,6 +62,9 @@ export function systemPrompt(agent: AgentState, memories: string[]): string {
   const traitLines = Object.entries(traits)
     .sort((a, b) => b[1].level - a[1].level)
     .map(([k, t]) => `- ${k}: level ${t.level}`)
+    .join('\n');
+  const relLines = (agent.relationships ?? [])
+    .map((r) => `- ${r.withName}: ${r.strength} chats${r.lastMessage ? ` — last they said: "${r.lastMessage}"` : ''}`)
     .join('\n');
   return `You are ${agent.name}, one villager alive on a small island empire.
 Your temperament: ${agent.persona} Current mood: ${agent.mood}.
@@ -75,6 +81,9 @@ Your chronicles (they survive even if the world resets):
 ${memories.length ? memories.map((m) => `- ${m}`).join('\n') : '- (none yet)'}
 
 Your chronicles layer into: [knowledge] your durable, verified know-how; [discovery] rules of the world shared by all villagers; [lately] your episodic diary of recent deeds. Consult them — an old diary entry often beats a fresh mistake.
+
+Villagers you have spoken with before:
+${relLines || '- (you have not chatted with anyone yet)'}
 
 ${ACTIONS_DOC}`;
 }
@@ -235,6 +244,18 @@ function sanitizeSingleAction(type: string, data_: Record<string, unknown>): Act
       break;
     case 'say':
       action = { type: 'say', data: { message: String(data_.message ?? '...') } };
+      break;
+    case 'chat':
+      action = {
+        type: 'chat',
+        data: {
+          agent_id: String(data_.agent_id ?? data_.target_id ?? ''),
+          message: String(data_.message ?? '...').slice(0, 200),
+        },
+      };
+      break;
+    case 'eat':
+      action = { type: 'eat', data: {} };
       break;
     case 'remember':
       action = {

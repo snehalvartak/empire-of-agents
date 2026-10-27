@@ -175,10 +175,13 @@ export interface AgentState {
   persona: string;
   status: string;
   inventory: string[];
+  hunger: number;
+  energy: number;
   lastThought?: string;
   lastBubble?: string;
   traits?: Record<string, { level: number; xp: number }>;
   goals?: Array<{ text: string; createdAt: number }>;
+  relationships?: Array<{ withId: string; withName: string; strength: number; lastMessage: string | null }>;
 }
 
 export interface WorldSnapshot {
@@ -196,6 +199,8 @@ export type ActionInput =
   | { type: 'deposit'; data: Record<string, never> }
   | { type: 'advance_age'; data: Record<string, never> }
   | { type: 'say'; data: { message: string } }
+  | { type: 'chat'; data: { agent_id: string; message: string } }
+  | { type: 'eat'; data: Record<string, never> }
   | { type: 'train'; data: { ability: string } }
   | { type: 'pick_up'; data: { object_id: string } }
   | { type: 'place'; data: { dx: number; dy: number } }
@@ -293,6 +298,7 @@ export interface ActionResult {
   civAge?: number;
   built?: { id: string; structure: WorldObject['kind']; pos: GridPos; by: string };
   spawned?: Array<{ id: string; pos: GridPos; by: string }>;
+  chat?: { withId: string; withName: string; message: string };
 }
 
 const RESOURCE_LABEL: Record<ResourceKind, string> = {
@@ -682,6 +688,35 @@ export function step(
         events: [{ type: 'train', message: `${agent.name} trained ${action.data.ability}`, data: { ability: action.data.ability } }],
       };
 
+    case 'chat': {
+      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
+      if (!target) return { ok: false, message: 'No such villager to chat with.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again?', events };
+      const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
+      if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
+      const msg = action.data.message.slice(0, 200);
+      return {
+        ok: true,
+        message: `You say to ${target.name}: "${msg}"`,
+        events: [
+          { type: 'chat', message: `${agent.name} to ${target.name}: "${msg}"` },
+        ],
+        chat: { withId: target.id, withName: target.name, message: msg },
+      };
+    }
+
+    case 'eat': {
+      if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first.', events };
+      if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map.', events };
+      snapshot.civ.food -= 1;
+      return {
+        ok: true,
+        message: 'You take 1 food from the stockpile and eat. Warmth spreads through you.',
+        events: [{ type: 'eat', message: `${agent.name} ate from the stockpile` }],
+        civDelta: { food: -1 },
+      };
+    }
+
     case 'wait':
       return { ok: true, message: 'You rest beside the road and watch the banners flutter.', events: [{ type: 'wait', message: `${agent.name} rests.` }] };
 
@@ -703,6 +738,14 @@ export function observe(snapshot: WorldSnapshot, agent: AgentState): string {
     lines.push(`Your current ambitions: ${agent.goals.map((g) => g.text).join('; ')}.`);
   }
   lines.push(`Empire stockpile: ${civ.wood} wood, ${civ.food} food, ${civ.gold} gold, ${civ.stone} stone.`);
+  const hungerNote =
+    agent.hunger >= 60 ? `You are HUNGRY (${agent.hunger}/100) — eat 1 food at the Town Center soon.` :
+    agent.hunger >= 30 ? `Your stomach rumbles a little (${agent.hunger}/100 hunger).` : null;
+  if (hungerNote) lines.push(hungerNote);
+  const energyNote =
+    agent.energy <= 25 ? `You are EXHAUSTED (${agent.energy}/100 energy) — waiting or resting will restore you.` :
+    agent.energy <= 50 ? `You feel tired (${agent.energy}/100 energy).` : null;
+  if (energyNote) lines.push(energyNote);
   lines.push(`Carrying: ${agent.inventory.length ? agent.inventory.join(', ') : 'nothing'}.`);
   if (tc) lines.push(`Town Center at (${tc.pos.x}, ${tc.pos.y}).`);
   const nextAge = civ.age < 4 ? AGE_COSTS[civ.age] : null;
@@ -718,6 +761,12 @@ export function observe(snapshot: WorldSnapshot, agent: AgentState): string {
   const othersStr = others.length
     ? others.map((a) => `${a.name} (${a.mood}) in ${territoryDef(a.island).name} at (${a.pos.x},${a.pos.y})`).join('; ')
     : 'no other villagers';
+  const closeBy = others.filter(
+    (a) => Math.abs(a.pos.x - agent.pos.x) <= 1 && Math.abs(a.pos.y - agent.pos.y) <= 1
+  );
   lines.push(`Fellow villagers: ${othersStr}.`);
+  if (closeBy.length) {
+    lines.push(`Standing right beside you (close enough to chat): ${closeBy.map((a) => `${a.name} (${a.id.slice(0, 8)})`).join('; ')}.`);
+  }
   return lines.join('\n');
 }

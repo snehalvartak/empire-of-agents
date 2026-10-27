@@ -28,6 +28,13 @@ interface Goal {
   createdAt: number;
 }
 
+interface RelationshipRow {
+  withId: string;
+  withName: string;
+  strength: number;
+  lastMessage: string | null;
+}
+
 function sanitizeGoals(raw: unknown): Goal[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -54,6 +61,7 @@ class Simulation {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private memoriesCache = new Map<string, string[]>();
   private pendingRespawns = new Map<string, { id: string; respawnAt: number }>();
+  private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
 
   subscribe(fn: Listener) {
     this.listeners.add(fn);
@@ -292,7 +300,10 @@ class Simulation {
       inventory: [],
       traits: sanitizeTraits(row.traits),
       goals: sanitizeGoals(row.goals),
+      hunger: row.hunger ?? 0,
+      energy: row.energy ?? 100,
     }));
+    await this.hydrateRelationships(agents);
 
     this.snapshot = {
       tick: 0,
@@ -468,6 +479,86 @@ class Simulation {
     this.memoriesCache.delete(agentId);
   }
 
+  /** Loads each agent's chat history with every other villager (name-based, session-agnostic). */
+  private async hydrateRelationships(agents: AgentState[]) {
+    for (const a of agents) {
+      this.relationshipsCache.delete(a.id);
+      await this.getRelationships(a);
+    }
+  }
+
+  private async getRelationships(agent: AgentState): Promise<RelationshipRow[]> {
+    const cached = this.relationshipsCache.get(agent.id);
+    if (cached) return [...cached.values()].sort((x, y) => y.strength - x.strength);
+
+    const map = new Map<string, RelationshipRow>();
+    const { data: namesakes } = await supabase.from('agents').select('id, name').eq('name', agent.name);
+    const ids = (namesakes ?? []).map((r) => r.id as string);
+    if (ids.length > 0) {
+      const { data: rels } = await supabase
+        .from('relationships')
+        .select('a_id, b_id, strength')
+        .or(`a_id.in.(${ids.join(',')}),b_id.in.(${ids.join(',')})`);
+      for (const r of rels ?? []) {
+        const otherId = ids.includes(r.a_id) ? r.b_id : r.a_id;
+        const { data: other } = await supabase
+          .from('agents')
+          .select('name')
+          .eq('id', otherId)
+          .maybeSingle();
+        if (other) {
+          map.set(other.name, {
+            withId: otherId,
+            withName: other.name,
+            strength: r.strength,
+            lastMessage: null,
+          });
+        }
+      }
+    }
+    this.relationshipsCache.set(agent.id, map);
+    return [...map.values()].sort((x, y) => y.strength - x.strength);
+  }
+
+  private async recordChat(from: AgentState, to: AgentState, message: string) {
+    await this.bumpRelationship(from, to, message);
+    await this.bumpRelationship(to, from, message);
+    const { data: countRow } = await supabase
+      .from('agents')
+      .select('chat_count')
+      .eq('id', from.id)
+      .maybeSingle();
+    await supabase.from('agents').update({ chat_count: (countRow?.chat_count ?? 0) + 1 }).eq('id', from.id);
+  }
+
+  private async bumpRelationship(a: AgentState, other: AgentState, lastMessage: string) {
+    let rels = this.relationshipsCache.get(a.id);
+    if (!rels) {
+      rels = new Map();
+      this.relationshipsCache.set(a.id, rels);
+    }
+    const existing = rels.get(other.name);
+    if (existing) {
+      existing.strength += 1;
+      existing.lastMessage = lastMessage;
+      await supabase
+        .from('relationships')
+        .update({ strength: existing.strength, last_chat_at: new Date().toISOString() })
+        .eq('a_id', [a.id, other.id].sort()[0])
+        .eq('b_id', [a.id, other.id].sort()[1]);
+    } else {
+      rels.set(other.name, { withId: other.id, withName: other.name, strength: 1, lastMessage });
+      const pair = [a.id, other.id].sort();
+      const { error } = await supabase
+        .from('relationships')
+        .upsert(
+          { a_id: pair[0], b_id: pair[1], strength: 1, session_id: this.session?.id ?? null },
+          { onConflict: 'a_id,b_id' }
+        );
+      if (error) console.error('relationship upsert failed:', error.message);
+    }
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
@@ -493,6 +584,12 @@ class Simulation {
     this.timer = setTimeout(() => void this.tick(), this.delay());
   }
 
+  /** Hunger rises and energy drains with every tick; recovering is the villager's own business. */
+  private applyNeeds(agent: AgentState) {
+    agent.hunger = Math.min(100, (agent.hunger ?? 0) + 4);
+    agent.energy = Math.max(0, (agent.energy ?? 100) - 3);
+  }
+
   private async tick() {
     if (!this.running) return;
     const agents = this.snapshot.agents;
@@ -505,6 +602,7 @@ class Simulation {
     const agent = agents[idx];
 
     this.respawnAnimals();
+    this.applyNeeds(agent);
 
     try {
       await this.runAgentTurn(agent);
@@ -516,6 +614,7 @@ class Simulation {
 
     this.snapshot.tick++;
     await this.updateAgentRow(agent);
+    await this.persistNeeds(agent);
     this.pushHistory();
     this.emit();
     this.schedule();
@@ -552,6 +651,7 @@ class Simulation {
     this.emit();
 
     const memories = await this.getMemories(agent.id, agent.name);
+    agent.relationships = await this.getRelationships(agent);
     const sys = systemPrompt(agent, memories);
     const obs = observe(this.snapshot, agent);
 
@@ -675,6 +775,21 @@ class Simulation {
     // mood flavor
     if (!result.ok) {
       agent.mood = 'frustrated';
+    } else if (action.type === 'chat') {
+      agent.mood = 'chatty';
+      agent.lastBubble = `to ${result.chat!.withName}: "${result.chat!.message}"`;
+      const target = this.snapshot.agents.find((a) => a.id === result.chat!.withId);
+      if (target) {
+        await this.recordChat(agent, target, result.chat!.message);
+        target.lastBubble = `${agent.name}: "${result.chat!.message}"`;
+      }
+    } else if (action.type === 'eat') {
+      agent.mood = 'fed';
+      agent.hunger = Math.max(0, (agent.hunger ?? 0) - 60);
+      agent.energy = Math.min(100, (agent.energy ?? 100) + 15);
+    } else if (action.type === 'wait') {
+      agent.mood = 'rested';
+      agent.energy = Math.min(100, (agent.energy ?? 100) + 25);
     } else if (action.type === 'build') {
       agent.mood = 'proud';
     } else if (action.type === 'gather') {
@@ -687,8 +802,6 @@ class Simulation {
       agent.mood = 'talkative';
     } else if (action.type === 'remember' || action.type === 'discover') {
       agent.mood = 'thoughtful';
-    } else if (action.type === 'wait') {
-      agent.mood = 'rested';
     } else {
       agent.mood = 'curious';
     }
@@ -764,6 +877,13 @@ class Simulation {
         mood: agent.mood,
         status: agent.status,
       })
+      .eq('id', agent.id);
+  }
+
+  private async persistNeeds(agent: AgentState) {
+    await supabase
+      .from('agents')
+      .update({ hunger: Math.round(agent.hunger), energy: Math.round(agent.energy) })
       .eq('id', agent.id);
   }
 }

@@ -2,3 +2,6 @@ project_id = "rtmycyexpfjjagclbqlo"
 
 [functions.agent-brain]
 verify_jwt = false
+
+[functions.settings-key]
+verify_jwt = false

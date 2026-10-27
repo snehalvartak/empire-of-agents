@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
-  Archive, PlayCircle, Eye, ArrowLeft,
+  Archive, PlayCircle, Eye, ArrowLeft, Zap,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
@@ -42,6 +42,8 @@ interface AgentRow {
   persona: string;
   traits?: Record<string, { level: number; xp: number }>;
   goals?: Array<{ text: string; createdAt: number }>;
+  hunger?: number;
+  energy?: number;
 }
 
 interface CivRow {
@@ -145,6 +147,8 @@ export default function WorldApp() {
           persona: a.persona,
           traits: a.traits,
           goals: a.goals,
+          hunger: Math.round(a.hunger),
+          energy: Math.round(a.energy),
         }))
       );
       if (sim.session && sim.session.id !== sessionId) {
@@ -182,6 +186,13 @@ export default function WorldApp() {
     setSessionTitle(sim.session?.title ?? null);
     await refreshSessions();
     if (sim.session) await loadFeed(sim.session.id);
+    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/settings-key`, {
+      headers: { 'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+    });
+    if (res.ok) {
+      const body = await res.json();
+      if (typeof body?.set === 'boolean') setKeyStatus(body.set ? 'set' : 'missing');
+    }
   }
 
   async function refreshSessions() {
@@ -227,6 +238,8 @@ export default function WorldApp() {
         inventory: [],
         traits: row.traits ?? {},
         goals: row.goals ?? [],
+        hunger: row.hunger ?? 0,
+        energy: row.energy ?? 100,
       })),
       objects: [...seedObjects(), ...built.map((r) => ({
         id: r.id,
@@ -288,10 +301,20 @@ export default function WorldApp() {
   }
 
   async function saveKey() {
-    await supabase
-      .from('settings')
-      .upsert({ id: 'global', openrouter_key: apiKey.trim(), updated_at: new Date().toISOString() });
-    setKeyStatus(apiKey.trim() ? 'set' : 'missing');
+    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/settings-key`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ key: apiKey.trim() }),
+    });
+    if (!res.ok) {
+      setKeyStatus('missing');
+      setError('Could not save the API key. Try again.');
+    } else {
+      setKeyStatus('set');
+    }
     setApiKey('');
     setShowSettings(false);
   }
@@ -577,6 +600,28 @@ export default function WorldApp() {
                             ))}
                         </div>
                       )}
+                      {typeof a.hunger === 'number' && typeof a.energy === 'number' && (
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <div className="flex items-center gap-1" title={`Hunger ${a.hunger}/100`}>
+                            <Wheat size={10} className="text-amber-100/40" />
+                            <div className="h-1 w-14 overflow-hidden rounded-full bg-amber-950">
+                              <div
+                                className={`h-full rounded-full ${a.hunger >= 60 ? 'bg-red-400' : 'bg-amber-500/70'}`}
+                                style={{ width: `${a.hunger}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1" title={`Energy ${a.energy}/100`}>
+                            <Zap size={10} className="text-amber-100/40" />
+                            <div className="h-1 w-14 overflow-hidden rounded-full bg-amber-950">
+                              <div
+                                className={`h-full rounded-full ${a.energy <= 25 ? 'bg-red-400' : 'bg-sky-400/70'}`}
+                                style={{ width: `${a.energy}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {viewing === 'live' && (
@@ -656,8 +701,10 @@ export default function WorldApp() {
                                 : e.type === 'deposit'
                                   ? 'bg-sky-500/15 text-sky-300'
                                   : e.type === 'say'
-                                    ? 'bg-orange-500/15 text-orange-300'
-                                    : e.type === 'thought'
+                                  ? 'bg-orange-500/15 text-orange-300'
+                                  : e.type === 'chat'
+                                  ? 'bg-pink-500/20 text-pink-300'
+                                  : e.type === 'thought'
                                       ? 'bg-cyan-500/15 text-cyan-300 italic'
                                       : e.type === 'level_up'
                                         ? 'bg-yellow-400/20 text-yellow-300'

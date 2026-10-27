@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INBOX_LIMIT, clearInbox, observe, step } from '../world.ts';
+import { INBOX_LIMIT, clearInbox, findVillager, observe, step } from '../world.ts';
 import type { AgentState, WorldSnapshot } from '../world.ts';
 import { mkAgent, mkSnapshot } from './fixtures.ts';
 
@@ -109,5 +109,33 @@ describe('R7.4 — inbox cap', () => {
     chat(snap, 'a', 'b', `line one\nline two ${'x'.repeat(300)}`);
     expect(b.inbox?.[0].message).toHaveLength(200);
     expect(observe(snap, b, [])).toContain('line one line two');
+  });
+});
+
+describe('R7.4 — villagers are addressed by the id they were shown', () => {
+  const longId = '3f2a9c1e-7b64-4d0a-9e51-0c8d2b7a6f10';
+
+  it('chat and gift accept the 8-character id printed in the observation', () => {
+    const a = mkAgent('a', 'Alder', 5, 5, ['wood']);
+    const b = mkAgent(longId, 'Bramble', 6, 5);
+    const snap = mkSnapshot([a, b]);
+    expect(observe(snap, a, [])).toContain(`Bramble (${longId.slice(0, 8)})`);
+
+    const chat = step(snap, 'a', { type: 'chat', data: { agent_id: longId.slice(0, 8), message: 'Well met.' } });
+    expect(chat.ok).toBe(true);
+    const gift = step(snap, 'a', { type: 'gift', data: { agent_id: longId.slice(0, 8), item: 'wood' } });
+    expect(gift.ok).toBe(true);
+  });
+
+  it('also accepts the full id and the villager name, but not an ambiguous or unknown reference', () => {
+    const a = mkAgent('a', 'Alder', 5, 5);
+    const b = mkAgent(longId, 'Bramble', 6, 5);
+    const c = mkAgent(longId.replace('3f2a', '3f2b'), 'Cedar', 4, 5);
+    const snap = mkSnapshot([a, b, c]);
+    expect(findVillager(snap, longId)?.name).toBe('Bramble');
+    expect(findVillager(snap, 'bramble')?.name).toBe('Bramble');
+    expect(findVillager(snap, '3f2')).toBeUndefined();
+    expect(findVillager(snap, '')).toBeUndefined();
+    expect(findVillager(snap, 'nobody')).toBeUndefined();
   });
 });

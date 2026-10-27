@@ -393,6 +393,18 @@ function canStand(p: GridPos): boolean {
   return territoryAt(p) !== null || isRoad(p);
 }
 
+/** Resolves the id a villager was shown: the full id, the 8-character prefix the observation prints, or the villager's name. */
+export function findVillager(snapshot: WorldSnapshot, ref: string): AgentState | undefined {
+  const wanted = String(ref ?? '').trim().toLowerCase();
+  if (!wanted) return undefined;
+  const exact = snapshot.agents.find((a) => a.id.toLowerCase() === wanted);
+  if (exact) return exact;
+  const byPrefix = wanted.length >= 4 ? snapshot.agents.filter((a) => a.id.toLowerCase().startsWith(wanted)) : [];
+  if (byPrefix.length === 1) return byPrefix[0];
+  const byName = snapshot.agents.filter((a) => a.name.toLowerCase() === wanted);
+  return byName.length === 1 ? byName[0] : undefined;
+}
+
 /** Breadth-first search over walkable land (territories and roads); other villagers block, objects do not. */
 function hasLandPath(snapshot: WorldSnapshot, agent: AgentState, target: GridPos): boolean {
   const key = (p: GridPos) => p.y * GRID_SIZE + p.x;
@@ -785,7 +797,7 @@ export function step(
       };
 
     case 'chat': {
-      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
+      const target = findVillager(snapshot, action.data.agent_id);
       if (!target) return { ok: false, message: 'No such villager to chat with. Use an id from "Standing right beside you" or "Fellow villagers", and stand beside them first.', events };
       if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again? Choose a villager standing beside you to chat with, or use say to speak aloud instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
@@ -811,7 +823,7 @@ export function step(
     }
 
     case 'gift': {
-      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
+      const target = findVillager(snapshot, action.data.agent_id);
       if (!target) return { ok: false, message: 'No such villager to give to. Use an id from "Standing right beside you", and stand beside them first.', events };
       if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing. Choose a villager standing beside you instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));

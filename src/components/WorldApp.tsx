@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
-  Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX,
+  Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn,
 } from 'lucide-react';
+import { Timeline, detectKeyMoments, type TimelineEvent, type KeyMoment } from '@/components/PaperViews';
+import { useReplayPlayer, ReplayControls, type ReplayCheckpoint } from '@/components/ReplayPlayer';
+import { useHeatmap } from '@/components/Heatmap';
 import { Panel, PixelButton, Badge } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
@@ -101,7 +104,12 @@ export default function WorldApp() {
   const [error, setError] = useState<string | null>(sim.error);
   const [tick, setTick] = useState(0);
   const [feedFilter, setFeedFilter] = useState<string | null>(null);
-  const [tab, setTab] = useState<'log' | 'memories' | 'minds' | 'replay'>('log');
+  const [memoryAgent, setMemoryAgent] = useState<string | null>(null);
+  const [memorySearch, setMemorySearch] = useState('');
+  const [suspectedFalse, setSuspectedFalse] = useState<Set<string>>(new Set());
+  const [heatRows, setHeatRows] = useState<Array<{ agent_id: string; x: number; y: number }>>([]);
+  const [heatmapOn, setHeatmapOn] = useState(false);
+  const [tab, setTab] = useState<'log' | 'timeline' | 'memories' | 'minds' | 'replay'>('log');
   const [sayEvent, setSayEvent] = useState<{ id: string; agentId: string; message: string } | null>(null);
 
   const [showAdd, setShowAdd] = useState(false);
@@ -123,6 +131,7 @@ export default function WorldApp() {
   const [sessionTitle, setSessionTitle] = useState<string | null>(sim.session?.title ?? null);
   const [viewing, setViewing] = useState<'live' | string>('live');
   const [archivedSnapshot, setArchivedSnapshot] = useState<WorldSnapshot | null>(null);
+  const [checkpoints, setCheckpoints] = useState<ReplayCheckpoint[]>([]);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
   const [carryMemories, setCarryMemories] = useState(true);
@@ -266,6 +275,17 @@ export default function WorldApp() {
 
   /** Opens an archived session read-only: final world + its chronicle. */
   async function viewArchived(s: SessionRow) {
+    const { data: cpRows } = await supabase
+      .from('checkpoints')
+      .select('tick, snapshot')
+      .eq('session_id', s.id)
+      .order('tick', { ascending: true });
+    const cps: ReplayCheckpoint[] = (cpRows ?? []).map((r) => ({
+      tick: r.tick,
+      snapshot: r.snapshot as WorldSnapshot,
+    }));
+    setCheckpoints(cps);
+    replay.reset(0);
     const { data: agentRows } = await supabase.from('agents').select('*').eq('session_id', s.id);
     const { data: builtRows } = await supabase.from('structures').select('*').eq('session_id', s.id);
     const { data: civRow } = await supabase.from('civ').select('*').eq('session_id', s.id).maybeSingle();
@@ -307,8 +327,10 @@ export default function WorldApp() {
   function returnToLive() {
     setViewing('live');
     setArchivedSnapshot(null);
+    setCheckpoints([]);
     setInspectAgent(null);
     setReplayTick(0);
+    replay.reset(0);
     if (sim.session) void loadFeed(sim.session.id);
   }
 
@@ -375,8 +397,11 @@ export default function WorldApp() {
   );
   const replayCiv = sim.history.length ? sim.history[Math.min(replayTick, sim.history.length - 1)].civ : null;
 
+  const replay = useReplayPlayer(checkpoints, viewing !== 'live' && checkpoints.length > 0);
+  const heatTiles = useHeatmap(heatRows, agents.map((a) => ({ id: a.id, name: a.name })));
   const viewingArchived = viewing !== 'live' ? sessions.find((s) => s.id === viewing) ?? null : null;
-  const worldSnapshot = viewingArchived ? archivedSnapshot : sim.snapshot;
+  const replayActive = viewingArchived !== null && checkpoints.length > 0;
+  const worldSnapshot = replayActive && replay.current ? replay.current.snapshot : viewingArchived ? archivedSnapshot : sim.snapshot;
 
   const statusDot = (s: string) =>
     s === 'thinking' ? 'bg-amber-400 animate-pulse' : s === 'acting' ? 'bg-emerald-400' : 'bg-stone-500';
@@ -540,9 +565,33 @@ export default function WorldApp() {
               sayEvent={viewing === 'live' ? sayEvent : null}
               focusAgentId={hotbarFocus}
               bubblesOn={bubblesOn}
+              heatmap={heatmapOn ? heatTiles : null}
             />
           )}
-          <p className="text-xs text-amber-100/40">Drag to orbit the world. Scroll or pinch to zoom.</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-amber-100/40">Drag to orbit the world. Scroll or pinch to zoom.</p>
+            <button
+              onClick={async () => {
+                const next = !heatmapOn;
+                setHeatmapOn(next);
+                if (next && heatRows.length === 0 && sessionId) {
+                  const { data } = await supabase
+                    .from('agent_positions')
+                    .select('agent_id, x, y')
+                    .eq('session_id', sessionId)
+                    .limit(5000);
+                  setHeatRows((data ?? []) as Array<{ agent_id: string; x: number; y: number }>);
+                }
+              }}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                heatmapOn
+                  ? 'border-amber-500/60 bg-amber-600/25 text-amber-200'
+                  : 'border-amber-900/40 text-amber-100/45 hover:text-amber-100/75'
+              }`}
+            >
+              Heatmap
+            </button>
+          </div>
 
           {/* villager hotbar: keys 1-9, click to focus the camera */}
           <div className="flex gap-1.5 overflow-x-auto pb-1">
@@ -784,6 +833,16 @@ export default function WorldApp() {
                 <Brain size={14} /> Minds
               </button>
               <button
+                onClick={() => setTab('timeline')}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${
+                  tab === 'timeline'
+                    ? 'border-b-2 border-amber-500 text-amber-200'
+                    : 'text-amber-100/40'
+                }`}
+              >
+                <ChartNoAxesColumn size={14} /> Timeline
+              </button>
+              <button
                 onClick={() => setTab('replay')}
                 className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${
                   tab === 'replay'
@@ -854,6 +913,52 @@ export default function WorldApp() {
                   ))
                   )}
                 </>
+              )}
+              {tab === 'timeline' && (
+                <div className="space-y-3">
+                  <Timeline
+                    events={events as unknown as TimelineEvent[]}
+                    agents={agents.map((a) => ({ id: a.id, name: a.name, color: a.color }))}
+                    onJump={(t) => {
+                      setReplayTick(Math.min(t, Math.max(0, sim.history.length - 1)));
+                      setTab('replay');
+                    }}
+                  />
+                  {(() => {
+                    const moments: KeyMoment[] = detectKeyMoments(
+                      events as unknown as TimelineEvent[],
+                      agents.map((a) => ({ id: a.id, name: a.name, color: a.color }))
+                    );
+                    if (moments.length === 0) return null;
+                    return (
+                      <div className="border-t border-amber-900/40 pt-3">
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-100/50">
+                          Key moments
+                        </p>
+                        <div className="grid grid-cols-1 gap-2">
+                          {moments.map((m, i) => (
+                            <button
+                              key={`${m.kind}-${i}`}
+                              onClick={() => {
+                                setReplayTick(Math.min(m.tick, Math.max(0, sim.history.length - 1)));
+                                setTab('replay');
+                              }}
+                              className="rounded-xl border border-amber-900/40 bg-[#15100a]/60 px-3 py-2 text-left hover:bg-amber-900/20"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: m.agentColor }} />
+                                <span className="text-sm font-bold text-amber-200">{m.label}</span>
+                                <span className="ml-auto text-[10px] text-amber-100/35">t{m.tick}</span>
+                              </div>
+                              <p className="mt-0.5 text-xs italic text-amber-50/70">“{m.quote}”</p>
+                              <p className="text-[10px] text-amber-100/40">— {m.agentName}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
               )}
               {tab === 'minds' && (
                 <div className="space-y-2">
@@ -931,6 +1036,32 @@ export default function WorldApp() {
                       </div>
                     )}
                   </div>
+
+                  {/* archived replay: checkpoint-based scrubber with playback */}
+                  {viewingArchived && (
+                    <div className="border-t border-amber-900/40 pt-3">
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-100/50">
+                        Replay of {viewingArchived.title}
+                      </p>
+                      {checkpoints.length === 0 ? (
+                        <p className="p-2 text-sm text-amber-100/40">
+                          No checkpoints recorded for this session — it predates the replay system. The final
+                          world is shown instead.
+                        </p>
+                      ) : (
+                        <ReplayControls
+                          tick={replay.tick}
+                          maxTick={replay.maxTick}
+                          playing={replay.playing}
+                          speed={replay.speed}
+                          onSeek={(t) => replay.setTick(t)}
+                          onPlayPause={() => replay.setPlaying(!replay.playing)}
+                          onSpeed={replay.setSpeed}
+                          onStep={(d) => replay.setTick(Math.max(0, Math.min(replay.maxTick, replay.tick + d)))}
+                        />
+                      )}
+                    </div>
+                  )}
 
                   {/* live timeline scrubber (in-memory history of the live session) */}
                   {viewing === 'live' && (
@@ -1011,40 +1142,106 @@ export default function WorldApp() {
                   )}
                 </div>
               )}
-              {tab === 'memories' &&
-                (memories.length === 0 ? (
-                  <p className="p-2 text-sm text-amber-100/40">
-                    No records yet. Villagers write these themselves.
-                  </p>
-                ) : (
-                  memories.map((m) => {
-                    const agent = agents.find((a) => a.id === m.agent_id);
-                    return (
-                      <div
-                        key={m.id}
-                        className="rounded-lg border border-amber-900/30 bg-[#15100a]/60 px-3 py-2"
+              {tab === 'memories' && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      onClick={() => setMemoryAgent(null)}
+                      className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                        memoryAgent === null
+                          ? 'border-amber-500/60 bg-amber-600/25 text-amber-200'
+                          : 'border-amber-900/40 bg-[#15100a]/60 text-amber-100/45 hover:text-amber-100/75'
+                      }`}
+                    >
+                      All
+                    </button>
+                    {agents.map((a) => (
+                      <button
+                        key={a.id}
+                        onClick={() => setMemoryAgent(a.id)}
+                        className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                          memoryAgent === a.id
+                            ? 'border-amber-500/60 bg-amber-600/25 text-amber-200'
+                            : 'border-amber-900/40 bg-[#15100a]/60 text-amber-100/45 hover:text-amber-100/75'
+                        }`}
                       >
-                        <div className="mb-1 flex items-center gap-2">
-                          <span
-                            className="h-2 w-2 rounded-sm"
-                            style={{ backgroundColor: agent?.color ?? '#8a6d3b' }}
-                          />
-                          <span className="text-xs font-medium text-amber-100">{agent?.name ?? 'Unknown'}</span>
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] ${
-                              m.kind === 'discovery'
-                                ? 'bg-cyan-500/20 text-cyan-300'
-                                : 'bg-amber-900/40 text-amber-100/50'
-                            }`}
-                          >
-                            {m.kind}
-                          </span>
-                        </div>
-                        <p className="text-sm text-amber-50/80">{m.content}</p>
-                      </div>
+                        {a.name}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    value={memorySearch}
+                    onChange={(e) => setMemorySearch(e.target.value)}
+                    placeholder="Search records…"
+                    className="w-full rounded-lg border border-amber-900/40 bg-[#0f0b07] px-3 py-1.5 text-xs text-amber-50 outline-none focus:border-amber-600/60"
+                  />
+                  {(() => {
+                    const filtered = memories.filter(
+                      (m) =>
+                        (!memoryAgent || m.agent_id === memoryAgent) &&
+                        (!memorySearch || m.content.toLowerCase().includes(memorySearch.toLowerCase()))
                     );
-                  })
-                ))}
+                    if (filtered.length === 0)
+                      return (
+                        <p className="p-2 text-sm text-amber-100/40">
+                          {memories.length === 0
+                            ? 'No records yet. Villagers write these themselves.'
+                            : 'No records match.'}
+                        </p>
+                      );
+                    return filtered.map((m) => {
+                      const agent = agents.find((a) => a.id === m.agent_id);
+                      return (
+                        <div
+                          key={m.id}
+                          className={`rounded-lg border bg-[#15100a]/60 px-3 py-2 ${
+                            suspectedFalse.has(m.id) ? 'border-red-700/60' : 'border-amber-900/30'
+                          }`}
+                        >
+                          <div className="mb-1 flex items-center gap-2">
+                            <span
+                              className="h-2 w-2 rounded-sm"
+                              style={{ backgroundColor: agent?.color ?? '#8a6d3b' }}
+                            />
+                            <span className="text-xs font-medium text-amber-100">{agent?.name ?? 'Unknown'}</span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] ${
+                                m.kind === 'discovery'
+                                  ? 'bg-cyan-500/20 text-cyan-300'
+                                  : m.kind === 'semantic'
+                                    ? 'bg-violet-500/15 text-violet-300'
+                                    : 'bg-amber-900/40 text-amber-100/50'
+                              }`}
+                            >
+                              {m.kind}
+                            </span>
+                            {suspectedFalse.has(m.id) && (
+                              <span className="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-red-300">
+                                false belief?
+                              </span>
+                            )}
+                            <button
+                              onClick={() =>
+                                setSuspectedFalse((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(m.id)) next.delete(m.id);
+                                  else next.add(m.id);
+                                  return next;
+                                })
+                              }
+                              title="Mark as a suspected false belief"
+                              className="ml-auto text-[10px] text-amber-100/30 hover:text-red-300"
+                            >
+                              {suspectedFalse.has(m.id) ? 'unflag' : 'flag'}
+                            </button>
+                          </div>
+                          <p className="text-sm text-amber-50/80">{m.content}</p>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              )}
             </div>
           </Panel>
 

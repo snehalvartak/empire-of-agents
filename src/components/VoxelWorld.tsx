@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import type { WorldSnapshot } from '@/sim/world';
+import { heatColor } from '@/components/Heatmap';
 import {
   buildObjects,
   buildTerrain,
@@ -18,12 +19,16 @@ export function VoxelWorld({
   sayEvent,
   focusAgentId,
   bubblesOn,
+  heatmap,
 }: {
   snapshot: WorldSnapshot;
   sayEvent?: { id: string; agentId: string; message: string } | null;
   focusAgentId?: string | null;
   bubblesOn?: boolean;
+  heatmap?: Array<{ x: number; y: number; intensity: number }> | null;
 }) {
+  const heatmapRef = useRef(heatmap);
+  heatmapRef.current = heatmap;
   const mountRef = useRef<HTMLDivElement>(null);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
@@ -117,6 +122,43 @@ export function VoxelWorld({
     scene.add(buildTerrain());
     let objectsGroup = buildObjects(snapshotRef.current.objects);
     scene.add(objectsGroup);
+
+    // heatmap overlay: translucent planes over the island tiles
+    let heatGroup: THREE.Group | null = null;
+    let lastHeatKey = '';
+    function syncHeatmap() {
+      const tiles = heatmapRef.current;
+      const key = tiles && tiles.length > 0 ? JSON.stringify(tiles) : '';
+      if (key === lastHeatKey) return;
+      lastHeatKey = key;
+      if (heatGroup) {
+        scene.remove(heatGroup);
+        heatGroup.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry.dispose();
+            (child.material as THREE.MeshBasicMaterial).dispose();
+          }
+        });
+        heatGroup = null;
+      }
+      if (!tiles || tiles.length === 0) return;
+      heatGroup = new THREE.Group();
+      const geo = new THREE.PlaneGeometry(0.95, 0.95);
+      for (const t of tiles) {
+        if (t.intensity < 0.08) continue;
+        const mat = new THREE.MeshBasicMaterial({
+          color: heatColor(t.intensity),
+          transparent: true,
+          opacity: 0.15 + t.intensity * 0.5,
+          depthWrite: false,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.set(t.x + 0.5, groundHeight(t.x, t.y) + 0.06, t.y + 0.5);
+        heatGroup.add(mesh);
+      }
+      scene.add(heatGroup);
+    }
 
     // villagers
     const rigs = new Map<string, VillagerRig>();
@@ -363,6 +405,7 @@ export function VoxelWorld({
     const lastBubbles = new Map<string, string>();
     const interval = setInterval(() => {
       syncAgents();
+      syncHeatmap();
       const snap = snapshotRef.current;
       for (const a of snap.agents) {
         if (!bubblesOnRef.current) {

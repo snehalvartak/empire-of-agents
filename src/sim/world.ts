@@ -248,6 +248,33 @@ export type ActionInput =
   | { type: 'remember'; data: { kind: 'semantic' | 'episodic'; content: string } }
   | { type: 'wait'; data: Record<string, never> };
 
+/** The single steps a decision executes: a plan's steps in order, otherwise the action itself. */
+export function planSteps(action: ActionInput): ActionInput[] {
+  return action.type === 'plan' ? action.data.steps : [action];
+}
+
+/**
+ * Runs steps strictly in order, awaiting each; a failed step ends the run there (R3.2, R8.4).
+ * `endedAt` is the index of the failing step, or null when every step succeeded.
+ */
+export async function runSteps<R extends { ok: boolean }>(
+  steps: ActionInput[],
+  exec: (step: ActionInput, index: number) => Promise<R>
+): Promise<{ results: R[]; endedAt: number | null }> {
+  const results: R[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const result = await exec(steps[i], i);
+    results.push(result);
+    if (!result.ok) return { results, endedAt: i };
+  }
+  return { results, endedAt: null };
+}
+
+/** Marks villagers' pending chat as heard: the inbox is shown exactly once (R7.4). */
+export function clearInbox(...agents: Array<AgentState | undefined>): void {
+  for (const a of agents) if (a) a.inbox = undefined;
+}
+
 /** Every action type, derived from the one definition table (ACTION_DEFS). */
 export const ACTION_TYPES = Object.keys(ACTION_DEFS) as ActionInput['type'][];
 

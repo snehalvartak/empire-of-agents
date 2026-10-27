@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import type { ActionInput, AgentState, CivState, TerritoryId, WorldObject, WorldSnapshot } from './world';
-import { nextIdFor, observe, seedObjects, step, territoryAt } from './world';
+import { clearInbox, nextIdFor, observe, planSteps, runSteps, seedObjects, step, territoryAt } from './world';
 import { callBrainWithRetry, systemPrompt } from './brain';
 import { pickNextActor } from './rotation';
 import { grantXp, sanitizeTraits } from './traits';
@@ -741,9 +741,7 @@ class Simulation {
     const decision = await callBrainWithRetry(agent.model, sys, obs);
 
     // what was spoken to this villager has now been heard — exactly once (R7.4)
-    agent.inbox = undefined;
-    const live = this.snapshot.agents.find((a) => a.id === agent.id);
-    if (live) live.inbox = undefined;
+    clearInbox(agent, this.snapshot.agents.find((a) => a.id === agent.id));
 
     // count and log unparseable replies instead of letting them read as a rest
     if (decision.fallback) {
@@ -762,15 +760,11 @@ class Simulation {
     agent.status = 'acting';
     this.emit();
 
-    const steps =
-      decision.action.type === 'plan'
-        ? (decision.action.data as { steps: ActionInput[] }).steps
-        : [decision.action];
+    const steps = planSteps(decision.action);
 
     const hist = this.actionHistory.get(agent.id) ?? [];
     this.turnCounts.set(agent.id, (this.turnCounts.get(agent.id) ?? 0) + 1);
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
+    const { endedAt } = await runSteps(steps, async (step, i) => {
       const result = await this.executeAction(agent, step, decision.thought, i === 0);
       hist.unshift({
         label: describeAction(step),
@@ -779,18 +773,16 @@ class Simulation {
       if (result.ok && step.type === 'wait') {
         this.waitCounts.set(agent.id, (this.waitCounts.get(agent.id) ?? 0) + 1);
       }
-      // a failed step ends the plan there; its plain-language reason is already in the chronicle
-      if (!result.ok) {
-        if (i < steps.length - 1) {
-          await this.logEvent({
-            agent_id: agent.id,
-            island: agent.island,
-            type: 'system',
-            message: `${agent.name}'s plan ends at step ${i + 1} of ${steps.length}; the remaining steps are not attempted.`,
-          });
-        }
-        break;
-      }
+      return result;
+    });
+    // a failed step ends the plan there; its plain-language reason is already in the chronicle
+    if (endedAt !== null && endedAt < steps.length - 1) {
+      await this.logEvent({
+        agent_id: agent.id,
+        island: agent.island,
+        type: 'system',
+        message: `${agent.name}'s plan ends at step ${endedAt + 1} of ${steps.length}; the remaining steps are not attempted.`,
+      });
     }
     this.actionHistory.set(agent.id, hist.slice(0, 3));
 

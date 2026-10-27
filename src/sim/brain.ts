@@ -24,6 +24,8 @@ export interface BrainDecision {
   rawReply?: string;
   /** true when the thought described a different action than the one taken */
   mismatch?: boolean;
+  /** true when the final decision is a plan whose thought does not cover all its steps (R8.4) */
+  planMismatch?: boolean;
 }
 
 const ACTIONS_DOC = `Available actions (respond with ONE action as JSON):
@@ -46,7 +48,7 @@ Mechanical facts of the world:
 - The strange CUBES scattered near the Town Center are toys of the old world: carry them, arrange them, throw them. The Town Center refuses them.
 - THE STANDING ROCK: high in the Stone Hills stands a rock unlike any other. Nobody remembers what it is for — find out.
 - Nobody commands you. There is no assigned task, no correct opening, no ideal build order. Do what seems right to you — wander, work, play, scheme, or stand still and watch the clouds.
-- Your thought must describe the action you chose — say what you are doing, not something else.
+- Your thought must describe the action you chose — say what you are doing, not something else. If you plan several steps, your thought must mention what every step does.
 - You evolve freely: the abilities you invent and train become part of who you are, shape how you act, and persist forever.
 - Answer ONLY with JSON: {"thought":"one short sentence","action":{...}} where action may be a plan with several steps. No prose before or after the JSON.`;
 
@@ -183,7 +185,28 @@ const ACTION_VERBS: Record<string, readonly string[]> = Object.fromEntries(
   Object.values(ACTION_DEFS).flatMap((d) => (d.verbs ? [[d.type, d.verbs] as const] : []))
 );
 
+/**
+ * The step types of a plan whose verb family the thought never names (R8.4).
+ * Each distinct type is checked once; types without a verb family are skipped.
+ * Empty for any non-plan action.
+ */
+export function planUncoveredTypes(thought: string, action: ActionInput): string[] {
+  if (action.type !== 'plan' || !thought) return [];
+  const lower = thought.toLowerCase();
+  const types = new Set(action.data.steps.map((s) => s.type));
+  return [...types].filter((t) => {
+    const verbs = ACTION_VERBS[t];
+    return verbs && !verbs.some((v) => lower.includes(v));
+  });
+}
+
+/** A plan's thought must name a verb from the family of every distinct step type. */
+export function thoughtMatchesPlan(thought: string, action: ActionInput): boolean {
+  return planUncoveredTypes(thought, action).length === 0;
+}
+
 export function thoughtMatchesAction(thought: string, action: ActionInput): boolean {
+  if (action.type === 'plan') return thoughtMatchesPlan(thought, action);
   const verbs = ACTION_VERBS[action.type];
   if (!verbs || !thought) return true;
   const lower = thought.toLowerCase();
@@ -210,15 +233,19 @@ export async function callBrainWithRetry(
 
   // thought says one thing, action does another: re-ask once with the mismatch noted
   if (!thoughtMatchesAction(first.thought, first.action)) {
+    const uncovered = planUncoveredTypes(first.thought, first.action);
+    const problem = uncovered.length
+      ? `does not cover every step of your plan — it never mentions the ${uncovered.join(', ')} step(s). Either make your thought say what every step does, or change the plan to match your thought.`
+      : `does not describe the action you chose (${first.action.type}). Either choose the action your thought describes, or rewrite the thought to describe what you will actually do.`;
     const retry = await callBrain(
       model,
-      `${system}\n\nYour thought "${first.thought.slice(0, 160)}" does not describe the action you chose (${first.action.type}). Either choose the action your thought describes, or rewrite the thought to describe what you will actually do. Reply with ONLY the JSON object.`,
+      `${system}\n\nYour thought "${first.thought.slice(0, 160)}" ${problem} Reply with ONLY the JSON object.`,
       observation
     );
     if (!retry.fallback && thoughtMatchesAction(retry.thought, retry.action)) {
       return { ...retry, mismatch: true };
     }
-    return { ...first, mismatch: true };
+    return { ...first, mismatch: true, ...(first.action.type === 'plan' ? { planMismatch: true } : {}) };
   }
 
   return first;

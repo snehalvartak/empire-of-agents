@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabase';
 import type { ActionInput, AgentState, CivState, TerritoryId, WorldObject, WorldSnapshot } from './world';
 import { nextIdFor, observe, seedObjects, step, territoryAt } from './world';
 import { callBrainWithRetry, systemPrompt } from './brain';
+import { pickNextActor } from './rotation';
 import { grantXp, sanitizeTraits } from './traits';
 
 export interface SessionRow {
@@ -87,6 +88,9 @@ class Simulation {
   private waitCounts = new Map<string, number>();
   private fallbackCounts = new Map<string, number>();
   private mismatchCounts = new Map<string, number>();
+  /** Turn-order cursor (R7.5): who acted last, and the roster index they held. */
+  private lastActorId: string | null = null;
+  private lastActorIndex = 0;
 
   subscribe(fn: Listener) {
     this.listeners.add(fn);
@@ -189,6 +193,8 @@ class Simulation {
   async startSession(carryMemories: boolean): Promise<boolean> {
     this.stop();
     this.memoriesCache.clear();
+    this.lastActorId = null;
+    this.lastActorIndex = 0;
     this.history = [];
     this.snapshot = {
       tick: 0,
@@ -318,6 +324,7 @@ class Simulation {
     }
     const seeds = seedObjects().filter((o) => !depletedIds.has(o.id));
 
+    const heard = new Map(this.snapshot.agents.map((a) => [a.id, a.inbox] as const));
     const agents: AgentState[] = (agentRows ?? []).map((row) => ({
       id: row.id,
       name: row.name,
@@ -333,6 +340,7 @@ class Simulation {
       goals: sanitizeGoals(row.goals),
       hunger: row.hunger ?? 0,
       energy: row.energy ?? 100,
+      inbox: heard.get(row.id),
     }));
     await this.hydrateRelationships(agents);
 
@@ -401,6 +409,8 @@ class Simulation {
   async resetWorld() {
     await this.endSession();
     this.memoriesCache.clear();
+    this.lastActorId = null;
+    this.lastActorIndex = 0;
     this.snapshot = {
       tick: 0,
       agents: [],
@@ -633,8 +643,10 @@ class Simulation {
       return;
     }
 
-    const idx = this.snapshot.tick % agents.length;
+    const idx = pickNextActor(agents.map((a) => a.id), this.lastActorId, this.lastActorIndex);
     const agent = agents[idx];
+    this.lastActorId = agent.id;
+    this.lastActorIndex = idx;
 
     this.respawnAnimals();
     this.applyNeeds(agent);
@@ -694,7 +706,7 @@ class Simulation {
     const s = this.snapshot;
     this.history.push({
       tick: s.tick,
-      agents: s.agents.map((a) => ({ ...a, pos: { ...a.pos } })),
+      agents: s.agents.map((a) => ({ ...a, pos: { ...a.pos }, inbox: a.inbox?.map((m) => ({ ...m })) })),
       objects: s.objects.map((o) => ({ ...o, pos: { ...o.pos } })),
       civ: { ...s.civ },
       nextId: s.nextId,
@@ -727,6 +739,11 @@ class Simulation {
     const obs = observe(this.snapshot, agent, this.actionHistory.get(agent.id) ?? []);
 
     const decision = await callBrainWithRetry(agent.model, sys, obs);
+
+    // what was spoken to this villager has now been heard — exactly once (R7.4)
+    agent.inbox = undefined;
+    const live = this.snapshot.agents.find((a) => a.id === agent.id);
+    if (live) live.inbox = undefined;
 
     // count and log unparseable replies instead of letting them read as a rest
     if (decision.fallback) {
@@ -761,6 +778,18 @@ class Simulation {
       });
       if (result.ok && step.type === 'wait') {
         this.waitCounts.set(agent.id, (this.waitCounts.get(agent.id) ?? 0) + 1);
+      }
+      // a failed step ends the plan there; its plain-language reason is already in the chronicle
+      if (!result.ok) {
+        if (i < steps.length - 1) {
+          await this.logEvent({
+            agent_id: agent.id,
+            island: agent.island,
+            type: 'system',
+            message: `${agent.name}'s plan ends at step ${i + 1} of ${steps.length}; the remaining steps are not attempted.`,
+          });
+        }
+        break;
       }
     }
     this.actionHistory.set(agent.id, hist.slice(0, 3));
@@ -890,6 +919,14 @@ class Simulation {
       if (target) {
         await this.recordChat(agent, target, result.chat!.message);
         target.lastBubble = `${agent.name}: "${result.chat!.message}"`;
+        if (result.chat!.dropped) {
+          await this.logEvent({
+            agent_id: target.id,
+            island: target.island,
+            type: 'system',
+            message: `${target.name} had too many unheard words pending; ${result.chat!.dropped.fromName}'s "${result.chat!.dropped.message.slice(0, 80)}" was lost.`,
+          });
+        }
       }
     } else if (action.type === 'gift' && result.gift) {
       agent.mood = 'generous';

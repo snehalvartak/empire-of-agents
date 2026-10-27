@@ -66,7 +66,7 @@ export const ACTION_DEFS: { [T in ActionType]: ActionDef<T> } = {
   deposit: {
     type: 'deposit',
     catalog: `{"type":"deposit","data":{}}  hand what you carry to the Town Center beside you, into the shared stockpile`,
-    verbs: ['deposit', 'hand', 'deliver', 'stockpile', 'store', 'unload'],
+    verbs: ['deposit', 'hand', 'deliver', 'stockpile', 'store', 'unload', 'bring', 'drop off'],
     sanitize: () => ({}),
   },
   pick_up: {
@@ -171,8 +171,8 @@ export const ACTION_DEFS: { [T in ActionType]: ActionDef<T> } = {
   plan: {
     type: 'plan',
     catalog: `{"type":"plan","data":{"steps":[<action>, <action>, ...]}}  execute 2-4 actions IN SEQUENCE this turn. Each step is a full action object like {"type":"goto",...}. Steps run one after another; later steps see earlier results.`,
-    // No verb family on purpose: how a plan's thought is checked against its
-    // steps is a separate piece of work (SPEC T4), not a plan-word heuristic.
+    // No verb family of its own: a plan's thought is checked against the verb
+    // families of its steps (thoughtMatchesPlan in brain.ts, SPEC R8.4).
     sanitize: (d) => {
       const steps = Array.isArray(d.steps) ? (d.steps as unknown[]) : [];
       const sanitized = steps

@@ -189,7 +189,15 @@ export interface AgentState {
   relationships?: Array<{ withId: string; withName: string; strength: number; lastMessage: string | null }>;
   /** In-memory only: last tiles this villager stood on, newest last. Drives wander. */
   recentTiles?: GridPos[];
+  /**
+   * In-memory only (R7.4): words spoken to this villager since its last turn, oldest first,
+   * at most INBOX_LIMIT. Always replaced, never mutated, so history snapshots stay frozen.
+   */
+  inbox?: Array<{ fromId: string; fromName: string; message: string }>;
 }
+
+/** Most pending chat messages a villager keeps; the oldest is dropped beyond this (R7.4). */
+export const INBOX_LIMIT = 3;
 
 export interface WorldSnapshot {
   tick: number;
@@ -330,7 +338,7 @@ export interface ActionResult {
   civAge?: number;
   built?: { id: string; structure: WorldObject['kind']; pos: GridPos; by: string };
   spawned?: Array<{ id: string; pos: GridPos; by: string }>;
-  chat?: { withId: string; withName: string; message: string };
+  chat?: { withId: string; withName: string; message: string; dropped?: { fromName: string; message: string } };
   gift?: { withId: string; withName: string; item: string };
 }
 
@@ -745,13 +753,22 @@ export function step(
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
       if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
       const msg = action.data.message.slice(0, 200);
+      // the target hears it in its next observation; beyond INBOX_LIMIT the oldest is lost
+      const pending = [...(target.inbox ?? []), { fromId: agent.id, fromName: agent.name, message: msg }];
+      const lost = pending.length > INBOX_LIMIT ? pending[0] : undefined;
+      target.inbox = pending.slice(-INBOX_LIMIT);
       return {
         ok: true,
         message: `You say to ${target.name}: "${msg}"`,
         events: [
           { type: 'chat', message: `${agent.name} to ${target.name}: "${msg}"` },
         ],
-        chat: { withId: target.id, withName: target.name, message: msg },
+        chat: {
+          withId: target.id,
+          withName: target.name,
+          message: msg,
+          ...(lost ? { dropped: { fromName: lost.fromName, message: lost.message } } : {}),
+        },
       };
     }
 
@@ -959,6 +976,10 @@ export function observe(
   }
   if (agent.inventory.length > 0 && closeBy.length) {
     lines.push('- gift {agent_id}: hand 1 carried item to a villager beside you — a gift deepens a bond');
+  }
+  if (agent.inbox?.length) {
+    lines.push('Words spoken to you since your last turn (answer if you like — no one forces a reply):');
+    for (const m of agent.inbox) lines.push(`- ${m.fromName} says: "${m.message.replace(/\s+/g, ' ')}"`);
   }
   if (history && history.length) {
     lines.push('Your last actions and what happened:');

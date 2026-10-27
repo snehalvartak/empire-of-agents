@@ -1,76 +1,19 @@
 /**
- * Single-driver lease (R7.6, R9.4): exactly one window drives the tick loop for
- * the live era. The lease lives on the `sessions` row as `driver_id` plus
- * `driver_heartbeat_at`. Everything here is pure: time is always passed in as a
- * number of milliseconds, never read from the host clock.
+ * Single-driver lease (R7.6, R9.4): exactly one window drives the tick loop for the live era. The lease lives
+ * on the `sessions` row as `driver_id` plus `driver_heartbeat_at`, and the DATABASE's clock decides everything
+ * about it: `claim_session_lease`, `renew_session_lease`, `release_session_lease` and `session_lease_state`
+ * (supabase/migrations/20261027210000_add_server_timed_lease_functions.sql) stamp and judge heartbeats with
+ * `now()`. A window never sends a time, so a browser clock that runs fast or slow cannot make a live lease look
+ * stale. What stays here is the timing the client owns (the heartbeat interval) and the unload request. Time is
+ * never read from the host clock in this module.
  */
 
-/** A lease whose last heartbeat is this old (or older) has timed out and may be taken over. */
+/** A lease whose last heartbeat is this old (or older) has timed out and may be taken over (the functions' default). */
 export const DRIVER_TTL_MS = 30000;
+/** The same limit in the whole seconds the SQL functions take. */
+export const DRIVER_TTL_SECONDS = DRIVER_TTL_MS / 1000;
 /** How often the driver renews its lease while the loop runs. */
 export const DRIVER_HEARTBEAT_MS = 10000;
-
-export type LeaseDecision = 'acquire' | 'renew' | 'denied';
-
-export interface LeaseRow {
-  driver_id: string | null;
-  driver_heartbeat_at: string | null;
-}
-
-/**
- * Boundary: a heartbeat exactly DRIVER_TTL_MS old is already stale (age >= TTL),
- * which matches the `lte` clause of the claim filter below.
- */
-export function decideLease(row: LeaseRow, myId: string, nowMs: number): LeaseDecision {
-  if (!row.driver_id) return 'acquire';
-  if (row.driver_id === myId) return 'renew';
-  const beat = row.driver_heartbeat_at ? Date.parse(row.driver_heartbeat_at) : Number.NaN;
-  if (Number.isNaN(beat)) return 'acquire';
-  return nowMs - beat >= DRIVER_TTL_MS ? 'acquire' : 'denied';
-}
-
-/** ISO-8601 UTC timestamp (millisecond precision) for a millisecond count, without a Date object. */
-export function toIso(ms: number): string {
-  const whole = Math.floor(ms);
-  const days = Math.floor(whole / 86400000);
-  const msOfDay = whole - days * 86400000;
-  // civil-from-days (proleptic Gregorian), days since 1970-01-01
-  const z = days + 719468;
-  const era = Math.floor(z / 146097);
-  const doe = z - era * 146097;
-  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
-  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
-  const mp = Math.floor((5 * doy + 2) / 153);
-  const day = doy - Math.floor((153 * mp + 2) / 5) + 1;
-  const month = mp < 10 ? mp + 3 : mp - 9;
-  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
-  const p = (n: number, w: number) => String(n).padStart(w, '0');
-  const h = Math.floor(msOfDay / 3600000);
-  const mi = Math.floor((msOfDay % 3600000) / 60000);
-  const s = Math.floor((msOfDay % 60000) / 1000);
-  return `${p(year, 4)}-${p(month, 2)}-${p(day, 2)}T${p(h, 2)}:${p(mi, 2)}:${p(s, 2)}.${p(msOfDay % 1000, 3)}Z`;
-}
-
-/** Heartbeats at or before this instant are stale. */
-export function leaseCutoffIso(nowMs: number): string {
-  return toIso(nowMs - DRIVER_TTL_MS);
-}
-
-/** Ids go straight into a PostgREST filter, so anything but letters, digits and hyphens is refused. */
-export function assertSafeDriverId(id: string): void {
-  if (!/^[A-Za-z0-9-]+$/.test(id)) throw new Error('Driver id may only contain letters, digits and hyphens.');
-}
-
-/**
- * The `.or(...)` filter of the atomic claim: the row matches when nobody drives it,
- * when I already do, or when the driver's last heartbeat is missing or has gone stale. Used as
- * `update({ driver_id, driver_heartbeat_at }).eq('id', sessionId).or(filter).select()`;
- * one conditional UPDATE, so of several competing claims only one gets a row back.
- */
-export function leaseClaimFilter(myId: string, nowMs: number): string {
-  assertSafeDriverId(myId);
-  return `driver_id.is.null,driver_id.eq.${myId},driver_heartbeat_at.is.null,driver_heartbeat_at.lte.${leaseCutoffIso(nowMs)}`;
-}
 
 /** Where the API lives and the public key it is called with (what `createClient` is given). */
 export interface ApiConfig {
@@ -80,28 +23,25 @@ export interface ApiConfig {
 
 /**
  * The request that frees the lease when the window goes away, as a plain `fetch` call that can be made
- * synchronously inside the `pagehide` handler. The supabase-js query builder cannot be used there: it looks
+ * synchronously inside the `pagehide` handler. The supabase-js client cannot be used there: it looks
  * up the auth session (async, behind a lock) before it sends anything, so a page that is unloading may stop
  * running before the request exists, and the era then stays "driven by another window" for the 30 s TTL. The
  * real-browser run found this: about 1 reload in 10 never sent its release. `keepalive` lets the browser finish
- * the request after the page is gone. Only the holder's own lease is freed (`driver_id=eq.<me>`), as in
- * the normal release.
+ * the request after the page is gone. It calls `release_session_lease`, which frees only the holder's own lease
+ * (`driver_id = p_driver`), as in the normal release. The ids travel in a JSON body, so nothing needs escaping.
  */
 export function leaseReleaseRequest(api: ApiConfig, sessionId: string, myId: string) {
-  assertSafeDriverId(myId);
-  if (!/^[A-Za-z0-9-]+$/.test(sessionId)) throw new Error('Session id may only contain letters, digits and hyphens.');
   return {
-    url: `${api.url.replace(/\/+$/, '')}/rest/v1/sessions?id=eq.${sessionId}&driver_id=eq.${myId}`,
+    url: `${api.url.replace(/\/+$/, '')}/rest/v1/rpc/release_session_lease`,
     init: {
-      method: 'PATCH' as const,
+      method: 'POST' as const,
       keepalive: true as const,
       headers: {
         apikey: api.anonKey,
         Authorization: `Bearer ${api.anonKey}`,
         'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
       },
-      body: JSON.stringify({ driver_id: null, driver_heartbeat_at: null }),
+      body: JSON.stringify({ p_session: sessionId, p_driver: myId }),
     },
   };
 }

@@ -33,7 +33,7 @@ import { BondWriteError, bondExchange, createBondWriter, pairKey, preferBond, ra
 import { browserBondStore } from './bondStore';
 import type { Bond, BondExchange, PairRow } from './bonds';
 import { grantXp, sanitizeTraits } from './traits';
-import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, leaseReleaseRequest, toIso } from './driver';
+import { DRIVER_HEARTBEAT_MS, DRIVER_TTL_SECONDS, leaseReleaseRequest } from './driver';
 
 export interface SessionRow {
   id: string;
@@ -56,9 +56,6 @@ export interface SessionRow {
   /** Turn cursor (R7.5) as of the last turn written; loadWorld reads it fresh, never from this copy. */
   last_actor_id?: string | null;
   last_actor_index?: number | null;
-  /** Single-driver lease (R7.6): the window driving the tick loop and its last heartbeat. */
-  driver_id?: string | null;
-  driver_heartbeat_at?: string | null;
 }
 
 const WATCHING_NOTE = 'Another window is driving this era — you are watching.';
@@ -193,7 +190,7 @@ class Simulation {
       .maybeSingle();
     if (live) {
       this.session = live as SessionRow;
-      this.syncDriverState();
+      await this.syncDriverState();
       return;
     }
 
@@ -1041,15 +1038,29 @@ class Simulation {
     this.driverNote = WATCHING_NOTE;
   }
 
+  /**
+   * Who holds the lease, as the DATABASE's clock sees it (`session_lease_state`): 'free' (nobody, or a
+   * heartbeat missing or 30 s old), 'mine', or 'other' (someone else, fresh). This window's own clock is
+   * never consulted, so a skewed clock cannot make a live driver look stale (R7.6). Null when it could not be asked.
+   */
+  private async leaseState(): Promise<'free' | 'mine' | 'other' | null> {
+    if (!this.session) return null;
+    const { data, error } = await supabase.rpc('session_lease_state', {
+      p_session: this.session.id,
+      p_driver: this.driverId,
+      p_ttl_seconds: DRIVER_TTL_SECONDS,
+    });
+    if (error) {
+      this.error = 'Could not check whether another window is driving this era.';
+      return null;
+    }
+    return data === 'free' || data === 'mine' || data === 'other' ? data : null;
+  }
+
   /** On opening a live era: watch it if a live driver holds it, otherwise stay free to start. */
-  private syncDriverState() {
+  private async syncDriverState() {
     if (!this.session) return;
-    const verdict = decideLease(
-      { driver_id: this.session.driver_id ?? null, driver_heartbeat_at: this.session.driver_heartbeat_at ?? null },
-      this.driverId,
-      Date.now()
-    );
-    if (verdict === 'denied') this.markReadOnly();
+    if ((await this.leaseState()) === 'other') this.markReadOnly();
     else {
       this.readOnly = false;
       this.driverNote = null;
@@ -1057,28 +1068,25 @@ class Simulation {
   }
 
   /**
-   * One conditional UPDATE, never read-then-write: it matches only when nobody
-   * drives the era, I do, or the driver's heartbeat is stale, and returns the row
-   * it changed. Zero rows back means another driver holds the lease.
+   * One conditional UPDATE inside `claim_session_lease`, never read-then-write: it matches only when nobody
+   * drives the era, I do, or the driver's heartbeat is stale by the database's clock, and says whether it
+   * took the row. False means another driver holds the lease.
    */
   private async claimLease(): Promise<'claimed' | 'denied' | 'error'> {
     if (!this.session) return 'error';
-    const now = Date.now();
-    const { data, error } = await supabase
-      .from('sessions')
-      .update({ driver_id: this.driverId, driver_heartbeat_at: toIso(now) })
-      .eq('id', this.session.id)
-      .or(leaseClaimFilter(this.driverId, now))
-      .select();
+    const { data, error } = await supabase.rpc('claim_session_lease', {
+      p_session: this.session.id,
+      p_driver: this.driverId,
+      p_ttl_seconds: DRIVER_TTL_SECONDS,
+    });
     if (error) {
       this.error = 'Could not check whether another window is driving this era.';
       return 'error';
     }
-    if (!data || data.length === 0) {
+    if (data !== true) {
       this.markReadOnly();
       return 'denied';
     }
-    this.session = { ...this.session, ...(data[0] as SessionRow) };
     this.readOnly = false;
     this.driverNote = null;
     return 'claimed';
@@ -1094,17 +1102,12 @@ class Simulation {
     this.heartbeat = null;
   }
 
-  /** Renews while running; zero rows updated means someone else took the lease, so stop at once. */
+  /** Renews while running (the database stamps the time); false means someone else took the lease, so stop at once. */
   private async renewLease() {
     if (!this.session) return;
-    const { data, error } = await supabase
-      .from('sessions')
-      .update({ driver_heartbeat_at: toIso(Date.now()) })
-      .eq('id', this.session.id)
-      .eq('driver_id', this.driverId)
-      .select('id');
+    const { data, error } = await supabase.rpc('renew_session_lease', { p_session: this.session.id, p_driver: this.driverId });
     if (error) return; // transient: the next beat retries
-    if (!data || data.length === 0) {
+    if (data !== true) {
       this.pauseLoop();
       this.stopHeartbeat();
       this.markReadOnly();
@@ -1116,11 +1119,7 @@ class Simulation {
   private async releaseLease() {
     if (!this.session) return;
     try {
-      await supabase
-        .from('sessions')
-        .update({ driver_id: null, driver_heartbeat_at: null })
-        .eq('id', this.session.id)
-        .eq('driver_id', this.driverId);
+      await supabase.rpc('release_session_lease', { p_session: this.session.id, p_driver: this.driverId });
     } catch {
       // best-effort: a lease that is not released simply times out
     }
@@ -1151,12 +1150,7 @@ class Simulation {
   /** Roster edits write to the era, so only the driver (or a window nobody else drives) may make them. */
   private async mayEditRoster(): Promise<boolean> {
     if (!this.readOnly && this.session && !this.running) {
-      const { data } = await supabase
-        .from('sessions')
-        .select('driver_id, driver_heartbeat_at')
-        .eq('id', this.session.id)
-        .maybeSingle();
-      if (data && decideLease(data, this.driverId, Date.now()) === 'denied') this.markReadOnly();
+      if ((await this.leaseState()) === 'other') this.markReadOnly();
     }
     if (this.readOnly) {
       this.emit();

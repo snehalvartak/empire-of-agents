@@ -44,6 +44,25 @@ function sanitizeGoals(raw: unknown): Goal[] {
 }
 type Listener = () => void;
 
+function describeAction(a: ActionInput): string {
+  const d = a.data as Record<string, unknown>;
+  switch (a.type) {
+    case 'goto': return `goto (${d.x},${d.y})`;
+    case 'move': return `move (${d.dx},${d.dy})`;
+    case 'gather': return `gather ${d.object_id}`;
+    case 'gather_nearest': return 'gather_nearest';
+    case 'build': return `build ${d.structure}`;
+    case 'chat': return `chat ${String(d.message ?? '').slice(0, 40)}`;
+    case 'say': return `say "${String(d.message ?? '').slice(0, 40)}"`;
+    case 'train': return `train ${d.ability}`;
+    case 'pick_up': return `pick_up ${d.object_id}`;
+    case 'place': return `place (${d.dx},${d.dy})`;
+    case 'throw': return `throw (${d.dx},${d.dy})`;
+    case 'plan': return 'plan (several steps)';
+    default: return a.type;
+  }
+}
+
 class Simulation {
   snapshot: WorldSnapshot = {
     tick: 0,
@@ -62,6 +81,11 @@ class Simulation {
   private memoriesCache = new Map<string, string[]>();
   private pendingRespawns = new Map<string, { id: string; respawnAt: number }>();
   private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
+  private actionHistory = new Map<string, Array<{ label: string; result: string }>>();
+  private turnCounts = new Map<string, number>();
+  private waitCounts = new Map<string, number>();
+  private fallbackCounts = new Map<string, number>();
+  private mismatchCounts = new Map<string, number>();
 
   subscribe(fn: Listener) {
     this.listeners.add(fn);
@@ -685,9 +709,24 @@ class Simulation {
     const memories = await this.getMemories(agent.id, agent.name);
     agent.relationships = await this.getRelationships(agent);
     const sys = systemPrompt(agent, memories);
-    const obs = observe(this.snapshot, agent);
+    const obs = observe(this.snapshot, agent, this.actionHistory.get(agent.id) ?? []);
 
     const decision = await callBrainWithRetry(agent.model, sys, obs);
+
+    // count and log unparseable replies instead of letting them read as a rest
+    if (decision.fallback) {
+      this.fallbackCounts.set(agent.id, (this.fallbackCounts.get(agent.id) ?? 0) + 1);
+      await this.logEvent({
+        agent_id: agent.id,
+        island: agent.island,
+        type: 'system',
+        message: `${agent.name}'s reply could not be parsed and fell back to wait. Raw reply: "${(decision.rawReply ?? '').replace(/\s+/g, ' ').slice(0, 200)}"`,
+      });
+    }
+    if (decision.mismatch) {
+      this.mismatchCounts.set(agent.id, (this.mismatchCounts.get(agent.id) ?? 0) + 1);
+    }
+
     agent.status = 'acting';
     this.emit();
 
@@ -696,13 +735,38 @@ class Simulation {
         ? (decision.action.data as { steps: ActionInput[] }).steps
         : [decision.action];
 
+    const hist = this.actionHistory.get(agent.id) ?? [];
+    this.turnCounts.set(agent.id, (this.turnCounts.get(agent.id) ?? 0) + 1);
     for (let i = 0; i < steps.length; i++) {
-      const result = await this.executeAction(agent, steps[i], decision.thought, i === 0);
-      // a failed step doesn't cancel the rest of the plan — villagers adapt
+      const step = steps[i];
+      const result = await this.executeAction(agent, step, decision.thought, i === 0);
+      hist.unshift({
+        label: describeAction(step),
+        result: result.ok ? result.message : `failed — ${result.message}`,
+      });
+      if (result.ok && step.type === 'wait') {
+        this.waitCounts.set(agent.id, (this.waitCounts.get(agent.id) ?? 0) + 1);
+      }
     }
+    this.actionHistory.set(agent.id, hist.slice(0, 3));
 
     agent.status = 'idle';
     this.focusAgent = null;
+  }
+
+  fallbackRate(agentId: string): number {
+    const total = this.turnCounts.get(agentId) ?? 0;
+    return total ? (this.fallbackCounts.get(agentId) ?? 0) / total : 0;
+  }
+
+  mismatchRate(agentId: string): number {
+    const total = this.turnCounts.get(agentId) ?? 0;
+    return total ? (this.mismatchCounts.get(agentId) ?? 0) / total : 0;
+  }
+
+  waitRate(agentId: string): number {
+    const total = this.turnCounts.get(agentId) ?? 0;
+    return total ? (this.waitCounts.get(agentId) ?? 0) / total : 0;
   }
 
   private async executeAction(

@@ -195,6 +195,7 @@ export type ActionInput =
   | { type: 'move'; data: { dx: number; dy: number } }
   | { type: 'goto'; data: { x: number; y: number } }
   | { type: 'gather'; data: { object_id: string } }
+  | { type: 'gather_nearest'; data: Record<string, never> }
   | { type: 'build'; data: { structure: 'house' | 'mill' | 'barracks' | 'watch_tower' | 'wonder' } }
   | { type: 'deposit'; data: Record<string, never> }
   | { type: 'advance_age'; data: Record<string, never> }
@@ -420,9 +421,26 @@ export function step(
       };
     }
 
+    case 'gather_nearest':
     case 'gather': {
-      const obj = snapshot.objects.find((o) => o.id === action.data.object_id);
-      if (!obj) return { ok: false, message: 'No such resource.', events };
+      let obj: WorldObject | undefined;
+      if (action.type === 'gather_nearest') {
+        const candidates = snapshot.objects
+          .map((o) => ({ o, d: Math.max(Math.abs(o.pos.x - agent.pos.x), Math.abs(o.pos.y - agent.pos.y)) }))
+          .filter(({ o, d }) => nodeResource(o.kind) !== null && d <= 1)
+          .sort((a, b) => a.d - b.d);
+        if (candidates.length === 0) {
+          return {
+            ok: false,
+            message: "Nothing can be gathered within arm's reach. March toward a resource first (goto).",
+            events,
+          };
+        }
+        obj = candidates[0].o;
+      } else {
+        obj = snapshot.objects.find((o) => o.id === action.data.object_id);
+        if (!obj) return { ok: false, message: 'No such resource.', events };
+      }
       const reach = Math.max(Math.abs(obj.pos.x - agent.pos.x), Math.abs(obj.pos.y - agent.pos.y));
       if (reach > 1) {
         return { ok: false, message: `The ${obj.kind.replace('_', ' ')} is beyond arm's reach. March onto or right beside it first (goto).`, events };
@@ -725,7 +743,44 @@ export function step(
   }
 }
 
-export function observe(snapshot: WorldSnapshot, agent: AgentState): string {
+export function availableActions(snapshot: WorldSnapshot, agent: AgentState): string[] {
+  const acts: string[] = [];
+  const gatherables = snapshot.objects.filter((o) => nodeResource(o.kind) !== null);
+  const cheb = (o: WorldObject) =>
+    Math.max(Math.abs(o.pos.x - agent.pos.x), Math.abs(o.pos.y - agent.pos.y));
+  const manhattan = (p: GridPos) => Math.abs(p.x - agent.pos.x) + Math.abs(p.y - agent.pos.y);
+  const inReach = gatherables
+    .filter((o) => cheb(o) <= 1)
+    .sort((a, b) => cheb(a) - cheb(b));
+  if (agent.inventory.length >= 2) {
+    acts.push('- (your hands are full — deposit at the Town Center before gathering more)');
+  } else if (inReach.length) {
+    const o = inReach[0];
+    acts.push(`- gather_nearest: take ${nodeResource(o.kind)} from the ${o.kind.replace('_', ' ')} beside you (in reach)`);
+  }
+  const tc = snapshot.objects.find((o) => o.kind === 'town_center');
+  const hasResources = agent.inventory.some((i) => i !== 'cube');
+  if (tc && hasResources) {
+    const d = Math.abs(tc.pos.x - agent.pos.x) + Math.abs(tc.pos.y - agent.pos.y);
+    if (d <= 1) {
+      acts.push(`- deposit: you carry ${agent.inventory.join(', ')} and stand at the Town Center`);
+    } else {
+      acts.push(`- goto (${tc.pos.x},${tc.pos.y}): Town Center, ${d} steps away (to deposit)`);
+    }
+  }
+  if (!inReach.length && agent.inventory.length < 2 && gatherables.length) {
+    const nearest = gatherables.slice().sort((a, b) => cheb(a) - cheb(b))[0];
+    acts.push(`- goto (${nearest.pos.x},${nearest.pos.y}): nearest ${nearest.kind.replace('_', ' ')}, ${manhattan(nearest.pos)} steps away`);
+  }
+  acts.push('- wait: rest');
+  return acts;
+}
+
+export function observe(
+  snapshot: WorldSnapshot,
+  agent: AgentState,
+  history?: Array<{ label: string; result: string }>
+): string {
   const civ = snapshot.civ;
   const nearby = snapshot.objects.filter(
     (o) => Math.abs(o.pos.x - agent.pos.x) <= 4 && Math.abs(o.pos.y - agent.pos.y) <= 4
@@ -768,5 +823,11 @@ export function observe(snapshot: WorldSnapshot, agent: AgentState): string {
   if (closeBy.length) {
     lines.push(`Standing right beside you (close enough to chat): ${closeBy.map((a) => `${a.name} (${a.id.slice(0, 8)})`).join('; ')}.`);
   }
+  if (history && history.length) {
+    lines.push('Your last actions and what happened:');
+    for (const h of history) lines.push(`- ${h.label} → ${h.result}`);
+  }
+  lines.push('Actions you can take now:');
+  for (const a of availableActions(snapshot, agent)) lines.push(a);
   return lines.join('\n');
 }

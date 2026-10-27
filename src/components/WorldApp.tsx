@@ -968,6 +968,7 @@ export default function WorldApp() {
                     agents.map((a) => {
                       const last = events.find((e) => e.agent_id === a.id);
                       const thought = events.find((e) => e.agent_id === a.id && e.type === 'thought');
+                      const lastAction = events.find((e) => e.agent_id === a.id && e.type !== 'thought' && e.type !== 'system');
                       return (
                         <div
                           key={a.id}
@@ -976,6 +977,11 @@ export default function WorldApp() {
                           <div className="mb-1 flex items-center gap-2">
                             <AgentAvatar name={a.name} color={a.color} size={22} status={a.status} />
                             <span className="text-sm font-medium text-amber-100">{a.name}</span>
+                            {lastAction && (
+                              <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-200/70">
+                                {lastAction.type.replace('_', ' ')}
+                              </span>
+                            )}
                             {a.status === 'thinking' && viewing === 'live' && (
                               <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-amber-400">
                                 <span className="h-1.5 w-1.5 animate-ping rounded-full bg-amber-400" />

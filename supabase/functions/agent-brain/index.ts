@@ -17,7 +17,7 @@ serve(async (req: Request) => {
   }
 
   try {
-    const { model, messages, max_tokens = 500, temperature = 0.9 } = await req.json();
+    const { model, messages, max_tokens = 500, temperature = 0.9, response_format } = await req.json();
 
     if (!model || !Array.isArray(messages)) {
       return new Response(
@@ -47,6 +47,10 @@ serve(async (req: Request) => {
       );
     }
 
+    const body: Record<string, unknown> = { model, messages, max_tokens, temperature };
+    // structured output: force the reply to conform to the act schema when asked
+    if (response_format) body.response_format = response_format;
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -55,7 +59,7 @@ serve(async (req: Request) => {
         'HTTP-Referer': 'https://machineplaying.demo',
         'X-Title': 'Machine Playing Demo',
       },
-      body: JSON.stringify({ model, messages, max_tokens, temperature }),
+      body: JSON.stringify(body),
     });
 
     const data = await response.json();

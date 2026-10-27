@@ -1,0 +1,4 @@
+{"date":"2026-10-27T18:10:43.499Z","ticks":2,"model":"openai/gpt-4o-mini","wait_rate":0,"gather_attempts":1,"gather_success_rate":100,"thought_mismatch_rate":0,"fallback_rate":0,"pass":true}
+{"date":"2026-10-27T18:11:21.708Z","ticks":20,"model":"openai/gpt-4o-mini","wait_rate":0,"gather_attempts":13,"gather_success_rate":100,"thought_mismatch_rate":0,"fallback_rate":0,"pass":true}
+{"date":"2026-10-27T18:12:46.453Z","ticks":5,"model":"openai/gpt-4o-mini","wait_rate":0,"gather_attempts":3,"gather_success_rate":100,"thought_mismatch_rate":0,"fallback_rate":0,"pass":true}
+{"date":"2026-10-27T18:13:48.293Z","ticks":20,"model":"openai/gpt-4o-mini","wait_rate":0,"gather_attempts":13,"gather_success_rate":100,"thought_mismatch_rate":0,"fallback_rate":0,"pass":true}

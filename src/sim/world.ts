@@ -452,7 +452,7 @@ export function step(
         return { ok: false, message: 'Beyond the known world lies the void. Stay on the map.', events };
       }
       if (!territoryAt(target) && !isRoad(target)) {
-        return { ok: false, message: 'That point lies in open water.', events };
+        return { ok: false, message: 'That point lies in open water. Choose a point on land, or follow the roads between the territories.', events };
       }
       let steps = 0;
       let cur = { ...agent.pos };
@@ -473,7 +473,7 @@ export function step(
             break;
           }
         }
-        if (!moved) return { ok: false, message: 'No clear path to that point.', events };
+        if (!moved) return { ok: false, message: 'No clear path to that point — open water or another villager is in the way. Try a nearer point, or step aside and go around.', events };
         steps++;
       }
       const now = territoryAt(cur);
@@ -540,7 +540,7 @@ export function step(
       const carriedCubes = agent.inventory.filter((i) => i === 'cube');
       const resources = agent.inventory.filter((i) => i !== 'cube');
       if (resources.length === 0) {
-        return { ok: false, message: carriedCubes.length ? 'You carry only a strange cube — the Town Center wants no part of it. Place or throw it instead.' : 'You carry nothing to deposit.', events };
+        return { ok: false, message: carriedCubes.length ? 'You carry only a strange cube — the Town Center wants no part of it. Place or throw it instead.' : 'You carry nothing to deposit. Gather something first.', events };
       }
       const tc = snapshot.objects.find((o) => o.kind === 'town_center');
       if (!tc) return { ok: false, message: 'There is no Town Center on the map.', events };
@@ -590,7 +590,7 @@ export function step(
         };
       }
       if (structure === 'wonder' && civ.age < 4) {
-        return { ok: false, message: 'A Wonder may only be raised in the Imperial Age.', events };
+        return { ok: false, message: "A Wonder may only be raised in the Imperial Age. Advance the empire's age first.", events };
       }
       civ.wood -= cost.wood;
       civ.stone -= cost.stone;

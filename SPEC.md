@@ -78,7 +78,7 @@ Everything below is built and working today. The spec builds on this; it does no
 **Known loose ends** (spec'd in sections 8, 9, 11 and tightened in the first build pass):
 - Checkpoints store world state but there is no restore-from-checkpoint path yet (replay only).
 - Snapshot/restore is *not* currently invisible to villagers: animal respawn runs on the wall clock (`Date.now() + ANIMAL_RESPAWN_MS`) and object ids are built from `Date.now()` (`built_…`, `cube_…`), violating the clock rule in section 5 and making pending respawns unrestorable. (No villager-visible message currently says "10 minutes"; the constant is internal.)
-- `plan` steps are not validated against the thought; only the first step's thought is recorded (rule in R8.4).
+- `plan` steps are not validated against the thought; only the first step's action is checked (rule in R8.4: every step must be covered by the thought).
 - Reliability targets exist in the harness but were not written down as pass/fail lines, and the harness scores a re-implementation of the brain (its own copy of the decide/mismatch logic) in aggregate, not per villager (R8.2, R11.1).
 - Chat "hearing" (section 7) is not implemented: a chat only updates the bond's last-exchange text; the target is not shown the message on its next turn (R7.4).
 - Observation hints name the nearest resource and the Standing Rock anywhere on the map, and the rock hint reveals its mechanic ("rumor says it reacts to thrown cubes") — see R5.4.
@@ -326,7 +326,7 @@ Borrowed by name from Clawblox's agent workspace files: `SOUL.md` (who you are, 
 - R8.1 — The mind's prompt contains exactly: persona + soul, skills, territories (from the manifest), chronicles (layered, capped), bonds, the action catalog, and the fresh observation. Nothing else leaks in (no database rows, no player text, no other villager's private layer).
 - R8.2 — Pass/fail honesty targets (measured by the harness, **per villager**): fallback rate ≤ 10%, thought/deed mismatch rate < 10%, wait rate < 20%, over a run of at least 100 turns per villager. The mismatch and wait numbers are the harness's existing targets (the gather-success target > 80% also stays); the fallback target is new (the harness currently reports it as informational only). A villager above target is a bug to fix (prompt or catalog), not a villager to delete.
 - R8.3 — A villager's stated intention and executed action are both visible to the player (thought bubbles + chronicle), so honesty is auditable.
-- R8.4 — **Plans are held to the thought too.** For a `plan`, the thought must describe the plan's first step (checked exactly like a single action). Every later step is executed and its own result is logged to the chronicle (R3.3); a step that fails ends the plan at that step with the world's plain-language reason. Plans are not checked for mismatch on later steps.
+- R8.4 — **Plans are held to the thought too.** For a `plan`, the thought must name at least one verb from the verb family of *every* step (a 3-step plan needs 3 distinct matches). A plan that fails is re-asked once with the mismatch named, exactly like a single action; if it still disagrees, the original is used and counted as a mismatch. Plan mismatches are counted separately in the harness so their effect on the R8.2 mismatch target is visible. Every step is executed and its own result is logged to the chronicle (R3.3); a step that fails ends the plan at that step with the world's plain-language reason.
 
 ## 9. Save and resume — snapshots vs. recordings
 

@@ -1,9 +1,16 @@
 import { useRef, useState, useEffect } from 'react';
+import { replaySnapshotOf } from '@/sim/checkpoint';
 import type { WorldSnapshot } from '@/sim/world';
 
 export interface ReplayCheckpoint {
   tick: number;
   snapshot: WorldSnapshot;
+}
+
+/** One `checkpoints` row as the scrubber wants it; reads old-format and current rows alike, null if unusable. */
+export function toReplayCheckpoint(row: { tick: number; snapshot: unknown }): ReplayCheckpoint | null {
+  const snapshot = replaySnapshotOf(row.snapshot);
+  return snapshot ? { tick: row.tick, snapshot } : null;
 }
 
 /**

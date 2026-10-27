@@ -14,6 +14,17 @@ import {
   territoryAt,
 } from './world';
 import { callBrainWithRetry, systemPrompt } from './brain';
+import { buildCheckpoint, restoreCheckpoint, withNewVillagerIds } from './checkpoint';
+import type { CheckpointBond, DepletedEntry } from './checkpoint';
+import {
+  MEMORY_WINDOW,
+  diaryEntryFor,
+  eraScopeFor,
+  layerMemories,
+  memoryTick,
+  visibilityFilter,
+} from './memory';
+import type { EraScope, MemoryRow } from './memory';
 import { pickNextActor } from './rotation';
 import { grantXp, sanitizeTraits } from './traits';
 import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, toIso } from './driver';
@@ -33,6 +44,9 @@ export interface SessionRow {
   stone: number | null;
   age: number | null;
   carry_memories: boolean;
+  /** Set on a forked era ("Era N, continued"): the archived era it continues and the checkpoint tick it started from. */
+  parent_session_id?: string | null;
+  fork_tick?: number | null;
   /** Single-driver lease (R7.6): the window driving the tick loop and its last heartbeat. */
   driver_id?: string | null;
   driver_heartbeat_at?: string | null;
@@ -118,7 +132,10 @@ class Simulation {
   private listeners = new Set<Listener>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private memoriesCache = new Map<string, string[]>();
-  private pendingRespawns = new Map<string, { id: string; respawnTick: number }>();
+  private eraScopeCache: { sessionId: string; scope: EraScope } | null = null;
+  /** Seeded objects taken from the world this era: mines (null, gone for good) and animals (due-tick). */
+  private depleted = new Map<string, number | null>();
+  private forking = false;
   private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
   private actionHistory = new Map<string, Array<{ label: string; result: string }>>();
   private turnCounts = new Map<string, number>();
@@ -282,6 +299,158 @@ class Simulation {
     return true;
   }
 
+  /**
+   * "Continue from here" (SPEC section 9, R9.4): forks a new live era, "Era N, continued", from an
+   * archived era's checkpoint (the latest at or before `tick`, default the latest). The archived era is
+   * never changed and no history is copied: events, positions and memories stay with the parent, and
+   * the fork reads the parent's memories through the tick-limited rule (memory.ts, `eraScopeFor`).
+   *
+   * Refuses, creating nothing, when the era has no checkpoint or the checkpoint does not match this
+   * world (E2, R6.5). Needs the single-driver lease (R7.6): ending the live era claims it, and a
+   * window that only watches is refused. Nothing runs afterwards; the viewer presses play.
+   */
+  async forkFromCheckpoint(archivedSessionId: string, tick?: number): Promise<{ ok: boolean; message: string }> {
+    if (this.forking || this.starting) return { ok: false, message: 'The world is busy changing era. Try again in a moment.' };
+    this.forking = true;
+    try {
+      return await this.forkEra(archivedSessionId, tick);
+    } finally {
+      this.forking = false;
+    }
+  }
+
+  private async forkEra(archivedSessionId: string, tick?: number): Promise<{ ok: boolean; message: string }> {
+    const refuse = (message: string) => ({ ok: false, message });
+    const { data: parentRow } = await supabase.from('sessions').select('*').eq('id', archivedSessionId).maybeSingle();
+    const parent = parentRow as SessionRow | null;
+    if (!parent || parent.status !== 'archived') return refuse('Only an archived era can be continued.');
+
+    let cpQuery = supabase.from('checkpoints').select('tick, snapshot').eq('session_id', parent.id);
+    if (tick !== undefined) cpQuery = cpQuery.lte('tick', tick);
+    const { data: cp } = await cpQuery.order('tick', { ascending: false }).limit(1).maybeSingle();
+    if (!cp) return refuse(`${parent.title} has no checkpoint${tick !== undefined ? ` at or before tick ${tick}` : ''} to continue from.`);
+    const restored = restoreCheckpoint(cp.snapshot, islandFingerprint);
+    if (!restored.ok) return refuse(restored.message); // E2: nothing has been created
+
+    // ending the live era (if any) claims the driver lease, so a window that only watches is refused (R9.4)
+    if (!this.session || this.session.status === 'archived') {
+      const { data: live } = await supabase.from('sessions').select('*').eq('status', 'live').order('started_at', { ascending: false }).limit(1).maybeSingle();
+      this.session = (live as SessionRow | null) ?? null;
+    }
+    if (this.session) {
+      if ((await this.endSession()) === null) {
+        return refuse('Another window is driving the current era, so this window cannot start a new one. Wait for it to stop (about 30 seconds after it closes), then try again.');
+      }
+    }
+
+    const { data: last } = await supabase.from('sessions').select('seq').order('seq', { ascending: false }).limit(1).maybeSingle();
+    const seq = (last?.seq ?? 0) + 1;
+    const { data: created, error } = await supabase
+      .from('sessions')
+      .insert({
+        seq,
+        title: `Era ${parent.seq}, continued`,
+        status: 'live',
+        carry_memories: parent.carry_memories,
+        parent_session_id: parent.id,
+        fork_tick: restored.snapshot.tick,
+      })
+      .select()
+      .single();
+    if (error || !created) return refuse('Could not create the new era.');
+    const sid = (created as SessionRow).id;
+    this.session = created as SessionRow;
+    this.eraScopeCache = null;
+    const abort = async (message: string) => {
+      // best effort: leave no half-built era behind
+      for (const table of ['agents', 'structures', 'civ', 'depleted_objects']) await supabase.from(table).delete().eq('session_id', sid);
+      await supabase.from('sessions').delete().eq('id', sid);
+      this.session = null;
+      this.readOnly = false;
+      this.driverNote = null;
+      return refuse(message);
+    };
+    if ((await this.claimLease()) !== 'claimed') return abort('Could not take over the new era. Try again.');
+
+    // the fork's villagers are new rows (same names, so they inherit by namesake); insert in roster order
+    const newIds: string[] = [];
+    for (const a of restored.snapshot.agents) {
+      const { data: row, error: agentError } = await supabase
+        .from('agents')
+        .insert({
+          session_id: sid,
+          name: a.name,
+          model: a.model,
+          color: a.color,
+          island: a.island,
+          position: a.pos,
+          persona: a.persona,
+          mood: a.mood,
+          status: 'idle',
+          hunger: Math.round(a.hunger),
+          energy: Math.round(a.energy),
+          traits: a.traits ?? {},
+          goals: a.goals ?? [],
+        })
+        .select('id')
+        .single();
+      if (agentError || !row) return abort('Could not restore the villagers.');
+      newIds.push(row.id as string);
+    }
+    const world = withNewVillagerIds(restored, newIds);
+
+    // what loadWorld reads back: built structures and cubes, the stockpile, and what is gone from the seeded world
+    const seedIds = new Set(seedObjects().map((o) => o.id));
+    const gone = new Map(world.depleted.map((d) => [d.id, d.respawnTick] as const));
+    for (const seed of seedObjects()) {
+      if (!world.snapshot.objects.some((o) => o.id === seed.id) && !gone.has(seed.id)) gone.set(seed.id, null);
+    }
+    const built = world.snapshot.objects.filter((o) => !seedIds.has(o.id));
+    const civ = world.snapshot.civ;
+    const writes = await Promise.all([
+      built.length
+        ? supabase.from('structures').insert(
+            built.map((o) => ({ session_id: sid, id: o.id, territory: o.territory, position: o.pos, kind: o.kind, built_by: o.builtBy ?? null }))
+          )
+        : Promise.resolve({ error: null }),
+      supabase.from('civ').upsert({ id: sid, session_id: sid, wood: civ.wood, food: civ.food, gold: civ.gold, stone: civ.stone, age: civ.age }),
+      gone.size
+        ? supabase.from('depleted_objects').insert([...gone].map(([id, respawnTick]) => ({ id, session_id: sid, respawn_tick: respawnTick })))
+        : Promise.resolve({ error: null }),
+    ]);
+    if (writes.some((w) => w.error)) return abort('Could not restore the world.');
+
+    // the in-memory world: tick continues from the checkpoint; cursor and pending messages come back with it
+    this.readOnly = false;
+    this.driverNote = null;
+    this.error = null;
+    this.memoriesCache.clear();
+    this.actionHistory.clear();
+    this.depleted = new Map(gone);
+    this.lastActorId = world.cursor.lastActorId;
+    this.lastActorIndex = world.cursor.lastActorIndex;
+    // Bonds: the checkpoint's strengths are this era's live values. The global relationships table is
+    // deliberately not rewritten here; it is only the starting point for a new era (SPEC section 9) and
+    // converges on the first interaction, when bumpRelationship upserts the pair's row.
+    this.relationshipsCache.clear();
+    for (const a of world.snapshot.agents) {
+      a.relationships = (a.relationships ?? []).map((r) => ({ ...r }));
+      this.relationshipsCache.set(a.id, new Map(a.relationships.map((r) => [r.withName, { ...r }] as const)));
+    }
+    this.snapshot = world.snapshot;
+    this.history = [];
+    this.pushHistory();
+    await this.logEvent({
+      agent_id: null,
+      island: null,
+      type: 'system',
+      message: `Era ${parent.seq}, continued: the empire wakes where tick ${world.snapshot.tick} left it.`,
+    });
+    await this.releaseLease(); // nothing runs until the viewer presses play
+    this.emit();
+    return { ok: true, message: `Continuing ${parent.title} from tick ${world.snapshot.tick}. Press play when you are ready.` };
+  }
+
   /** Grand, evocative title derived from the session's own chronicle. */
   private async storyTitle(seq: number): Promise<string> {
     const fallback = `Session ${seq}`;
@@ -373,9 +542,12 @@ class Simulation {
       builtBy: r.built_by,
     }));
 
+    // continue from the last tick this era recorded (never back to 0): respawn due-ticks and the
+    // 50-tick checkpoint cadence only make sense on the era's own clock
+    const loadedTick = await this.lastRecordedTick(sid);
+
     // depleted seeds: mines taken this session (null respawn_tick = permanent),
     // plus animals whose due-tick is still ahead of the tick we load at
-    const loadedTick = 0;
     const { data: depletedRows } = await supabase
       .from('depleted_objects')
       .select('*')
@@ -384,11 +556,8 @@ class Simulation {
       (r) => r.respawn_tick == null || (r.respawn_tick as number) > loadedTick
     );
     const depletedIds = new Set(stillDepleted.map((r) => r.id as string));
-    this.pendingRespawns.clear();
-    for (const r of stillDepleted) {
-      if (r.respawn_tick == null) continue;
-      this.pendingRespawns.set(`${sid}:${r.id}`, { id: r.id as string, respawnTick: r.respawn_tick as number });
-    }
+    this.depleted.clear();
+    for (const r of stillDepleted) this.depleted.set(r.id as string, (r.respawn_tick as number | null) ?? null);
     const seeds = seedObjects().filter((o) => !depletedIds.has(o.id));
 
     const heard = new Map(this.snapshot.agents.map((a) => [a.id, a.inbox] as const));
@@ -422,6 +591,26 @@ class Simulation {
     this.history = [];
     this.pushHistory();
     this.emit();
+  }
+
+  /**
+   * The tick this era last reached: the highest tick in its events, positions and checkpoints
+   * (and, for a fork, the tick it started from), never lower than what this window already shows.
+   */
+  private async lastRecordedTick(sid: string): Promise<number> {
+    const latest = async (table: 'events' | 'agent_positions' | 'checkpoints'): Promise<number> => {
+      const { data } = await supabase
+        .from(table)
+        .select('tick')
+        .eq('session_id', sid)
+        .not('tick', 'is', null)
+        .order('tick', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      return typeof data?.tick === 'number' ? data.tick : 0;
+    };
+    const ticks = await Promise.all([latest('events'), latest('agent_positions'), latest('checkpoints')]);
+    return Math.max(this.session?.fork_tick ?? 0, this.snapshot.tick, ...ticks);
   }
 
   async addAgent(a: {
@@ -462,7 +651,7 @@ class Simulation {
       this.emit();
       return;
     }
-    this.memoriesCache.delete(data.id);
+    this.invalidateMemories(data.id);
     await this.loadWorld();
     await this.logEvent({
       agent_id: data.id,
@@ -475,7 +664,7 @@ class Simulation {
   async removeAgent(id: string) {
     if (!(await this.mayEditRoster())) return;
     await supabase.from('agents').delete().eq('id', id);
-    this.memoriesCache.delete(id);
+    this.invalidateMemories(id);
     await this.loadWorld();
   }
 
@@ -551,43 +740,52 @@ class Simulation {
     const cached = this.memoriesCache.get(cacheKey);
     if (cached) return cached;
 
-    let rows: Array<{ content: string; kind: string }> = [];
-    // villagers remember by name across sessions: a new Alder inherits the
-    // chronicles of every past Alder — unless this session is amnesiac
-    const carryMemories = this.session ? this.session.carry_memories : true;
-    if (carryMemories) {
+    // villagers remember by name across sessions: a new Alder inherits the chronicles of every past
+    // Alder (as far as the era's scope allows: amnesiac eras, forks), and every villager shares the
+    // empire's discoveries (R5.3). The layering itself is the pure layerMemories (memory.ts).
+    const scope = await this.currentEraScope();
+    let namesakeIds = [agentId];
+    if (scope.carryMemories || scope.fork) {
       const { data: namesakes } = await supabase.from('agents').select('id').eq('name', agentName);
-      const ids = (namesakes ?? []).map((r) => r.id as string);
-      if (ids.length > 0) {
-        const { data } = await supabase
-          .from('memories')
-          .select('content, kind')
-          .in('agent_id', ids)
-          .order('created_at', { ascending: false })
-          .limit(30);
-        rows = data ?? [];
-      }
-    } else {
-      const { data } = await supabase
-        .from('memories')
-        .select('content, kind')
-        .eq('agent_id', agentId)
-        .order('created_at', { ascending: false })
-        .limit(30);
-      rows = data ?? [];
+      namesakeIds = (namesakes ?? []).map((r) => r.id as string);
     }
-
-    // layered like Eko's workspace: durable knowledge first, then discoveries, then the diary
-    const knowledge = rows.filter((r) => r.kind === 'semantic').slice(0, 6).map((r) => `[knowledge] ${r.content}`);
-    const discoveries = rows.filter((r) => r.kind === 'discovery').slice(0, 6).map((r) => `[discovery] ${r.content}`);
-    const episodes = rows.filter((r) => r.kind === 'episodic').slice(0, 8).map((r) => `[lately] ${r.content}`);
-    const list = [...knowledge, ...discoveries, ...episodes];
+    // the database makes the era-and-tick cut before the row limit, so a fork's parent rows past the fork tick cannot crowd out the visible ones
+    const cut = visibilityFilter(scope);
+    const select = 'id, content, kind, agent_id, session_id, tick, created_at';
+    let own = supabase.from('memories').select(select).in('agent_id', namesakeIds).order('created_at', { ascending: false }).limit(MEMORY_WINDOW);
+    let shared = supabase.from('memories').select(select).eq('kind', 'discovery').order('created_at', { ascending: false }).limit(MEMORY_WINDOW);
+    if (cut) {
+      own = own.or(cut);
+      shared = shared.or(cut);
+    }
+    const [ownRes, sharedRes] = await Promise.all([own, shared]);
+    const rows = [...(ownRes.data ?? []), ...(sharedRes.data ?? [])] as MemoryRow[];
+    const list = layerMemories(rows, { scope, namesakeIds });
     this.memoriesCache.set(cacheKey, list);
     return list;
   }
 
-  invalidateMemories(agentId: string) {
-    this.memoriesCache.delete(agentId);
+  /** What the live era may inherit: ordinary, amnesiac, or forked from an archived era (memory.ts). */
+  private async currentEraScope(): Promise<EraScope> {
+    const session = this.session;
+    if (!session) return { sessionId: 'none', carryMemories: true };
+    if (this.eraScopeCache?.sessionId === session.id) return this.eraScopeCache.scope;
+    let scope: EraScope = { sessionId: session.id, carryMemories: session.carry_memories };
+    if (session.parent_session_id) {
+      const { data } = await supabase.from('sessions').select('id, seq, parent_session_id, fork_tick, carry_memories');
+      scope = eraScopeFor((data ?? []) as Array<Parameters<typeof eraScopeFor>[0][number]>, session.id) ?? scope;
+    }
+    this.eraScopeCache = { sessionId: session.id, scope };
+    return scope;
+  }
+
+  /** The next turn must see fresh chronicles: a villager's own entries, or everyone's after a shared discovery. */
+  invalidateMemories(agentId: string, shared = false) {
+    if (shared) {
+      this.memoriesCache.clear();
+      return;
+    }
+    for (const key of [...this.memoriesCache.keys()]) if (key.endsWith(`:${agentId}`)) this.memoriesCache.delete(key);
   }
 
   /** Loads each agent's chat history with every other villager (name-based, session-agnostic). */
@@ -652,11 +850,15 @@ class Simulation {
     if (existing) {
       existing.strength += 1;
       existing.lastMessage = lastMessage;
+      // upsert, not update: in a new or forked era the pair of ids is new, and the first interaction
+      // is what writes the global row (it converges on the era's live value)
+      const pair = [a.id, other.id].sort();
       await supabase
         .from('relationships')
-        .update({ strength: existing.strength, last_chat_at: new Date().toISOString() })
-        .eq('a_id', [a.id, other.id].sort()[0])
-        .eq('b_id', [a.id, other.id].sort()[1]);
+        .upsert(
+          { a_id: pair[0], b_id: pair[1], strength: existing.strength, last_chat_at: new Date().toISOString(), session_id: this.session?.id ?? null },
+          { onConflict: 'a_id,b_id' }
+        );
     } else {
       rels.set(other.name, { withId: other.id, withName: other.name, strength: 1, lastMessage });
       const pair = [a.id, other.id].sort();
@@ -897,26 +1099,34 @@ class Simulation {
     });
   }
 
-  /** Full world snapshot every 50 ticks, for replay seeking and thumbnails. */
+  /** Bond strengths as the era lives them now: the relationship cache, not the stale copy on the villager. */
+  private bondsOf(agent: AgentState): CheckpointBond[] {
+    return [...(this.relationshipsCache.get(agent.id)?.values() ?? [])].map((r) => ({
+      withId: r.withId,
+      withName: r.withName,
+      strength: r.strength,
+      lastMessage: r.lastMessage,
+    }));
+  }
+
+  private depletedEntries(): DepletedEntry[] {
+    return [...this.depleted].map(([id, respawnTick]) => ({ id, respawnTick }));
+  }
+
+  /** Full world snapshot every 50 ticks: replay seeking, thumbnails, and "Continue from here" (restore/fork). */
   private async maybeCheckpoint() {
     if (this.snapshot.tick % 50 !== 0) return;
     const s = this.snapshot;
-    await supabase.from('checkpoints').upsert(
-      {
-        session_id: this.session?.id ?? null,
-        tick: s.tick,
-        snapshot: {
-          tick: s.tick,
-          agents: s.agents,
-          objects: s.objects,
-          civ: s.civ,
-          nextId: s.nextId,
-          // R6.5: restore refuses a checkpoint whose world fingerprint differs (checkFingerprint)
-          fingerprint: islandFingerprint,
-        },
-      },
-      { onConflict: 'session_id,tick' }
-    );
+    const payload = buildCheckpoint({
+      // R6.5: restore refuses a checkpoint whose world fingerprint differs
+      fingerprint: islandFingerprint,
+      snapshot: { ...s, agents: s.agents.map((a) => ({ ...a, relationships: this.bondsOf(a) })) },
+      cursor: { lastActorId: this.lastActorId, lastActorIndex: this.lastActorIndex },
+      depleted: this.depletedEntries(),
+    });
+    await supabase
+      .from('checkpoints')
+      .upsert({ session_id: this.session?.id ?? null, tick: s.tick, snapshot: payload }, { onConflict: 'session_id,tick' });
   }
 
   private pushHistory() {
@@ -934,14 +1144,14 @@ class Simulation {
   /** Gathered animals quietly return to their herds once their time is up. */
   private respawnAnimals() {
     const now = this.snapshot.tick;
-    for (const [key, row] of this.pendingRespawns) {
-      if (now < row.respawnTick) continue;
-      const seed = seedObjects().find((o) => o.id === row.id);
+    for (const [id, respawnTick] of this.depleted) {
+      if (respawnTick === null || now < respawnTick) continue; // mines never come back
+      const seed = seedObjects().find((o) => o.id === id);
       if (seed && !this.snapshot.objects.some((o) => o.pos.x === seed.pos.x && o.pos.y === seed.pos.y)) {
         this.snapshot.objects.push(seed);
         this.snapshot.objects = [...this.snapshot.objects];
       }
-      this.pendingRespawns.delete(key);
+      this.depleted.delete(id);
     }
   }
 
@@ -1039,24 +1249,27 @@ class Simulation {
       message: `${agent.name}: ${result.message}`,
     });
 
+    // every memory row carries the era and the tick it was written at (SPEC section 8)
+    const stamp = { session_id: this.session?.id ?? null, tick: memoryTick(this.snapshot.tick) };
     if (result.memory) {
       await supabase.from('memories').insert({
-        session_id: this.session?.id ?? null,
+        ...stamp,
         agent_id: agent.id,
         kind: result.memory.kind,
         content: result.memory.content,
         island: agent.island,
       });
-      this.invalidateMemories(agent.id);
+      this.invalidateMemories(agent.id, result.memory.kind === 'discovery');
     }
 
     // the villager's diary: every deed becomes an episodic memory it can consult later
-    if (result.ok && action.type !== 'remember' && action.type !== 'discover') {
+    const diary = diaryEntryFor(action, result);
+    if (diary) {
       await supabase.from('memories').insert({
-        session_id: this.session?.id ?? null,
+        ...stamp,
         agent_id: agent.id,
-        kind: 'episodic',
-        content: result.message.slice(0, 240),
+        kind: diary.kind,
+        content: diary.content,
         island: agent.island,
       });
       this.invalidateMemories(agent.id);
@@ -1111,12 +1324,7 @@ class Simulation {
         session_id: this.session?.id ?? null,
         respawn_tick: result.depleted.respawnTick,
       });
-      if (result.depleted.respawnTick !== null) {
-        this.pendingRespawns.set(`${this.session?.id ?? ''}:${result.depleted.id}`, {
-          id: result.depleted.id,
-          respawnTick: result.depleted.respawnTick,
-        });
-      }
+      this.depleted.set(result.depleted.id, result.depleted.respawnTick);
     }
 
     // mood flavor

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { Timeline, Discoveries, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
 import { ReplayControls } from '@/components/ReplayPlayer';
-import { useReplayPlayer, type ReplayCheckpoint } from '@/components/replay';
+import { toReplayCheckpoint, useReplayPlayer, type ReplayCheckpoint } from '@/components/replay';
 import { detectKeyMoments } from '@/components/paperUtils';
 import { useHeatmap } from '@/components/Heatmap';
 import { Panel } from '@/components/ui/Pixel';
@@ -140,6 +140,10 @@ export default function WorldApp() {
   const [showNewSession, setShowNewSession] = useState(false);
   const [carryMemories, setCarryMemories] = useState(true);
   const [sessionBusy, setSessionBusy] = useState(false);
+  const [cpTicks, setCpTicks] = useState<Record<string, number>>({});
+  const [forkBusy, setForkBusy] = useState<string | null>(null);
+  const [confirmFork, setConfirmFork] = useState<string | null>(null);
+  const [forkNotice, setForkNotice] = useState<{ id: string; ok: boolean; message: string } | null>(null);
   const [endedNotice, setEndedNotice] = useState<string | null>(null);
   const [hotbarFocus, setHotbarFocus] = useState<string | null>(null);
   const [bubblesOn, setBubblesOn] = useState(() => {
@@ -269,6 +273,35 @@ export default function WorldApp() {
   async function refreshSessions() {
     const { data } = await supabase.from('sessions').select('*').order('seq', { ascending: false });
     setSessions((data ?? []) as unknown as SessionRow[]);
+    // latest checkpoint per era: "Continue from here" needs one to exist
+    const { data: cps } = await supabase.from('checkpoints').select('session_id, tick');
+    const latest: Record<string, number> = {};
+    for (const c of cps ?? []) if (c.session_id) latest[c.session_id] = Math.max(latest[c.session_id] ?? 0, c.tick);
+    setCpTicks(latest);
+  }
+
+  /** Forks a new live era from an archived era's latest checkpoint; a live era must be ended first, so ask once. */
+  async function continueFrom(s: SessionRow) {
+    if (sessionId && confirmFork !== s.id) {
+      setConfirmFork(s.id);
+      return;
+    }
+    setConfirmFork(null);
+    setForkBusy(s.id);
+    const res = await sim.forkFromCheckpoint(s.id);
+    setForkBusy(null);
+    setForkNotice({ id: s.id, ok: res.ok, message: res.message });
+    setSessionId(sim.session?.id ?? null);
+    setSessionTitle(sim.session?.title ?? null);
+    if (res.ok) {
+      setEndedNotice(null);
+      setViewing('live');
+      setArchivedSnapshot(null);
+      setCheckpoints([]);
+      setInspectAgent(null);
+    }
+    await refreshSessions();
+    if (res.ok && sim.session) await loadFeed(sim.session.id);
   }
 
   async function loadFeed(sid: string) {
@@ -295,10 +328,7 @@ export default function WorldApp() {
       .select('tick, snapshot')
       .eq('session_id', s.id)
       .order('tick', { ascending: true });
-    const cps: ReplayCheckpoint[] = (cpRows ?? []).map((r) => ({
-      tick: r.tick,
-      snapshot: r.snapshot as WorldSnapshot,
-    }));
+    const cps = (cpRows ?? []).flatMap((r) => toReplayCheckpoint(r) ?? []);
     setCheckpoints(cps);
     replay.reset(0);
     const { data: agentRows } = await supabase.from('agents').select('*').eq('session_id', s.id);
@@ -1065,8 +1095,8 @@ export default function WorldApp() {
                         {sessions
                           .filter((s) => s.status === 'archived')
                           .map((s) => (
+                            <div key={s.id}>
                             <button
-                              key={s.id}
                               onClick={() => (viewing === s.id ? returnToLive() : void viewArchived(s))}
                               className={`w-full rounded-lg border px-3 py-2 text-left ${
                                 viewing === s.id
@@ -1096,6 +1126,33 @@ export default function WorldApp() {
                                 <div className="mt-0.5 text-xs text-amber-100/50">{s.summary}</div>
                               )}
                             </button>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 px-1">
+                              <button
+                                onClick={() => void continueFrom(s)}
+                                disabled={cpTicks[s.id] === undefined || forkBusy !== null}
+                                title={
+                                  cpTicks[s.id] === undefined
+                                    ? 'No checkpoint was recorded for this era, so it cannot be continued.'
+                                    : `Start a new era from this one's latest checkpoint (tick ${cpTicks[s.id]})`
+                                }
+                                className="rounded-lg border border-amber-700/50 px-3 py-1 text-xs text-amber-200 hover:bg-amber-900/30 disabled:opacity-40"
+                              >
+                                {forkBusy === s.id
+                                  ? 'Continuing…'
+                                  : confirmFork === s.id
+                                    ? 'Confirm: this ends the current era'
+                                    : 'Continue from here'}
+                              </button>
+                              {cpTicks[s.id] === undefined && (
+                                <span className="text-[10px] text-amber-100/40">No checkpoint was recorded for this era.</span>
+                              )}
+                              {forkNotice?.id === s.id && (
+                                <span className={`text-[11px] ${forkNotice.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+                                  {forkNotice.message}
+                                </span>
+                              )}
+                            </div>
+                            </div>
                           ))}
                       </div>
                     )}

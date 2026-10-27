@@ -735,7 +735,6 @@ async function scenarioBondRetry() {
     await waitVillagers(page);
   };
   await reloadApp(p);
-  console.log('DBG agents', json(q(`SELECT id, session_id, name, position FROM agents ORDER BY created_at`)), 'DBG rels', json(q('SELECT a_id,b_id,strength,session_id FROM relationships')), 'ERA', era);
   check('setup: nothing is left in the dirty-bond store before the scenario starts', (await dirtyRows(p)) === null, json(await dirtyRows(p)));
   const chatScript = (text) => gw.scriptNext((r) => {
     const m = /Standing right beside you[^:]*: ([A-Za-z]+) \(([0-9a-f]{8})\)/.exec(r.observation);
@@ -762,6 +761,10 @@ async function scenarioBondRetry() {
   await haltAndSettle(p, era, 'p2 (healthy chat)');
   const pair = { a_id: healthy[0].row.a_id, b_id: healthy[0].row.b_id };
   const S1 = healthy[healthy.length - 1].row.strength;
+  // the bond started from an earlier era's row (namesakes inherit bonds), so this pins that both sides still write the pair of THIS era's villagers
+  const eraIds = q(`SELECT id FROM agents WHERE session_id=${lit(era)}`).map((r) => r.id).sort();
+  check('healthy chat: both upserts carried the same pair of ids, and it is this era\'s two villagers (not an earlier era\'s namesake of either)',
+    healthy.every((u) => u.row.a_id === pair.a_id && u.row.b_id === pair.b_id) && json([pair.a_id, pair.b_id].sort()) === json(eraIds), json([healthy.map((u) => [u.row.a_id, u.row.b_id]), eraIds]));
   check('healthy chat: both upserts were answered 2xx and the database holds the pair at the strength the app wrote',
     healthy.every((u) => u.status >= 200 && u.status < 300) && q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0]?.strength === S1 && S1 >= 1, json([healthy.map((u) => [u.status, u.row.strength]), S1]));
   check('healthy chat: nothing is left in localStorage (the row was saved before the request and removed when it succeeded)', (await dirtyRows(p)) === null, json(await dirtyRows(p)));
@@ -821,9 +824,14 @@ async function scenarioBondRetry() {
   await waitVillagers(p3);
   check('p3 opened while "another window" holds the lease: the watch banner is shown', await p3.getByText(WATCH_BANNER).isVisible());
   await sleep(3000);
-  check('p3 (the watcher) sent no write at all and made no relationships request (it holds the dirty row but does not flush it)',
-    requestsOf('p3', isWrite).length === 0 && gw.log.slice(mark4).filter((e) => e.page === 'p3' && tableOf(e) === 'relationships').length === 0,
-    gw.log.slice(mark4).filter((e) => e.page === 'p3' && isWrite(e)).map((e) => `${e.method} ${e.url}`).join('\n'));
+  // The watcher does read `relationships` while it loads the world (getRelationships: GET relationships?select=a_id,b_id,strength&or=(...)),
+  // which every window needs to show the bonds; that READ is legitimate. What R7.6 forbids is a write, and what would show the row
+  // being recovered is the compare-then-write that recoverBonds does (GET select=strength&a_id=eq.<pair> + an upsert).
+  const p3Rel = gw.log.slice(mark4).filter((e) => e.page === 'p3' && tableOf(e) === 'relationships');
+  const p3Compare = p3Rel.filter((e) => /select=strength&a_id=eq\./.test(e.url));
+  check('p3 (the watcher) sent no write of any kind, no relationships write, and did not run the recovery (no compare read for the pair); its only relationships requests are the load-time bond GETs',
+    requestsOf('p3', isWrite).length === 0 && p3Rel.every((e) => e.method === 'GET') && p3Compare.length === 0 && p3Rel.length >= 1,
+    p3Rel.map((e) => `${e.method} ${decodeURIComponent(e.url).slice(0, 150)} -> ${e.status}`).join('\n') + '\nwrites:\n' + gw.log.slice(mark4).filter((e) => e.page === 'p3' && isWrite(e)).map((e) => `${e.method} ${e.url}`).join('\n'));
   check(`DB: the pair is unchanged while p3 watches (${dbNow}, not ${BIG}), and the row is still in p3's localStorage`,
     q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0].strength === dbNow && (await dirtyRows(p3))?.[0]?.strength === BIG);
   x(`UPDATE sessions SET driver_id=NULL, driver_heartbeat_at=NULL WHERE id=${lit(era)}`);

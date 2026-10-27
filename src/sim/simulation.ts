@@ -29,7 +29,7 @@ import type { EraScope, MemoryRow } from './memory';
 import { pickNextActor } from './rotation';
 import { agentStateFromRow, agentStatePatch, carriedPatch, cursorFromRow, cursorPatch } from './persisted';
 import { eventsForResult, planEndRow } from './chronicle';
-import { BondWriteError, bondExchange, createBondWriter, pairKey, raiseBond, recordBond, recoveryFor } from './bonds';
+import { BondWriteError, bondExchange, createBondWriter, pairKey, preferBond, raiseBondsFromRows, recordBond, recoveryFor } from './bonds';
 import { browserBondStore } from './bondStore';
 import type { Bond, BondExchange, PairRow } from './bonds';
 import { grantXp, sanitizeTraits } from './traits';
@@ -849,6 +849,27 @@ class Simulation {
       this.relationshipsCache.delete(a.id);
       await this.getRelationships(a);
     }
+    // a load replaces the maps with what the table holds, which can be older than a write that has not landed yet
+    this.raiseBondsFromPending(agents);
+  }
+
+  /**
+   * Raises the in-memory bonds (both villagers' maps, the cache the prompts and checkpoints read) to every pending
+   * row of the writer, so an exchange whose write failed is not lost from memory either. Pure rule in bonds.ts;
+   * it creates a villager's map when the cache has none, so it is right whether the cache was loaded before or
+   * after, and it is re-run after every hydrate. Rows of other eras are skipped.
+   */
+  private raiseBondsFromPending(agents: AgentState[]) {
+    const rows = this.bondWriter.pendingRows();
+    if (rows.length === 0) return;
+    raiseBondsFromRows(rows, agents, (id) => {
+      let rels = this.relationshipsCache.get(id);
+      if (!rels) {
+        rels = new Map();
+        this.relationshipsCache.set(id, rels);
+      }
+      return rels;
+    });
   }
 
   /**
@@ -857,9 +878,9 @@ class Simulation {
    * the database and before any turn can bump a bond. Only the driver's window, or a free one, may write
    * (a watcher keeps them and recovers when it takes the lease over: `start` reloads the world).
    * For each row: the pair's strength is read from the database; a row that is not strictly higher is
-   * stale and dropped (bonds only grow, so the higher strength is the later: `recoveryFor`), otherwise the
-   * in-memory bonds of both villagers are raised to it (so the next exchange builds on it instead of on the
-   * stale database value) and the row is written once. A row the database cannot take for good (a villager
+   * stale and dropped (bonds only grow, so the higher strength is the later: `recoveryFor`); the in-memory bonds
+   * of both villagers are raised to the rows that remain (`raiseBondsFromPending`, so the next exchange builds
+   * on them instead of on the stale database value) and each is written once. A row the database cannot take for good (a villager
    * that no longer exists: foreign-key violation) is dropped by the writer; a transient failure keeps it.
    */
   private async recoverBonds(agents: AgentState[]) {
@@ -871,17 +892,9 @@ class Simulation {
       if (stored === undefined) continue; // cannot tell right now: keep the row, it is retried with the next write
       if (recoveryFor(row, stored) === 'drop') {
         this.bondWriter.discard(pairKey(row));
-        continue;
-      }
-      const a = agents.find((v) => v.id === row.a_id);
-      const b = agents.find((v) => v.id === row.b_id);
-      const relsA = a && this.relationshipsCache.get(a.id);
-      const relsB = b && this.relationshipsCache.get(b.id);
-      if (a && b && relsA && relsB) {
-        raiseBond(relsA, b, row.strength);
-        raiseBond(relsB, a, row.strength);
       }
     }
+    this.raiseBondsFromPending(agents); // the rows that remain (and any dropped ones are no higher than memory already is)
     await this.bondWriter.retry();
   }
 
@@ -901,6 +914,7 @@ class Simulation {
     if (cached) return [...cached.values()].sort((x, y) => y.strength - x.strength);
 
     const map = new Map<string, RelationshipRow>();
+    const ownRows = new Map<string, boolean>();
     const { data: namesakes } = await supabase.from('agents').select('id, name').eq('name', agent.name);
     const ids = (namesakes ?? []).map((r) => r.id as string);
     if (ids.length > 0) {
@@ -916,12 +930,18 @@ class Simulation {
           .eq('id', otherId)
           .maybeSingle();
         if (other) {
-          map.set(other.name, {
-            withId: otherId,
-            withName: other.name,
-            strength: r.strength,
-            lastMessage: null,
-          });
+          // several rows can name the same villager (one per era's pair of namesakes): see preferBond
+          const own = r.a_id === agent.id || r.b_id === agent.id;
+          const had = map.get(other.name);
+          if (preferBond(had && { strength: had.strength, own: ownRows.get(other.name) === true }, { strength: r.strength, own })) {
+            ownRows.set(other.name, own);
+            map.set(other.name, {
+              withId: otherId,
+              withName: other.name,
+              strength: r.strength,
+              lastMessage: null,
+            });
+          }
         }
       }
     }

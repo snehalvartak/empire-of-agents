@@ -59,6 +59,10 @@ function bump(rels: BondMap, self: Villager, other: Villager, delta: number, las
   if (existing) {
     existing.strength += delta;
     existing.lastMessage = lastMessage;
+    // A bond inherited from the table (getRelationships is name-based, across eras) points at the namesake of an
+    // earlier era. It is now a bond with THIS villager: re-point it, or `pairRowFor` would write the row of
+    // (self, earlier namesake) and each side of one exchange would land on a different row.
+    existing.withId = other.id;
     return { self, bond: existing, created: false };
   }
   const bond: Bond = { withId: other.id, withName: other.name, strength: delta, lastMessage };
@@ -179,9 +183,10 @@ export function recoveryFor(row: Pick<PairRow, 'strength'>, stored: number | nul
 }
 
 /**
- * Brings one side's in-memory bond up to a recovered strength (never down). `rels` is that villager's map and `other` the one it is with; the
- * bond is created if it is missing. A bond that already points at a different villager of the same name
- * (an earlier era's namesake) is left alone. Returns whether anything changed.
+ * Brings one side's in-memory bond up to a recovered strength (never down). `rels` is that villager's map and
+ * `other` the one it is with; the bond is created if it is missing. A bond that points at an earlier era's
+ * namesake (inherited from the table) is the same relationship in this era: it is re-pointed at `other`, and
+ * raised if the strength is higher. Returns whether anything changed.
  */
 export function raiseBond(rels: BondMap, other: Villager, strength: number): boolean {
   const existing = rels.get(other.name);
@@ -189,9 +194,48 @@ export function raiseBond(rels: BondMap, other: Villager, strength: number): boo
     rels.set(other.name, { withId: other.id, withName: other.name, strength, lastMessage: null });
     return true;
   }
-  if (existing.withId !== other.id || existing.strength >= strength) return false;
-  existing.strength = strength;
-  return true;
+  let changed = false;
+  if (existing.withId !== other.id) {
+    existing.withId = other.id;
+    changed = true;
+  }
+  if (existing.strength < strength) {
+    existing.strength = strength;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Raises the in-memory bonds of BOTH villagers of every row to the row's strength (never lowers one). Rows whose
+ * villagers are not both on the roster (an archived era's leftovers) are skipped. `relsOf` must hand out the
+ * villager's map, creating it if the cache has none yet, so this works before or after the cache was loaded from
+ * the database: call it again after every (re)load of the cache, since a load replaces the maps. Returns how many
+ * rows changed something.
+ */
+export function raiseBondsFromRows(rows: ReadonlyArray<Pick<PairRow, 'a_id' | 'b_id' | 'strength'>>, roster: ReadonlyArray<Villager>, relsOf: (villagerId: string) => BondMap): number {
+  let changed = 0;
+  for (const row of rows) {
+    const a = roster.find((v) => v.id === row.a_id);
+    const b = roster.find((v) => v.id === row.b_id);
+    if (!a || !b) continue;
+    const sideA = raiseBond(relsOf(a.id), b, row.strength);
+    const sideB = raiseBond(relsOf(b.id), a, row.strength);
+    if (sideA || sideB) changed++;
+  }
+  return changed;
+}
+
+/**
+ * Which of two bonds with the same villager name (loaded from rows of different eras' namesakes) a villager
+ * starts from: the one whose row involves the villager itself (its own era's value) wins over an inherited one,
+ * otherwise the stronger (bonds only grow, so it is the later). Replaces "whichever row came last", which was
+ * arbitrary and could reset an era's bond to an earlier era's value on reload.
+ */
+export function preferBond(current: { strength: number; own: boolean } | undefined, candidate: { strength: number; own: boolean }): boolean {
+  if (!current) return true;
+  if (candidate.own !== current.own) return candidate.own;
+  return candidate.strength > current.strength;
 }
 
 export interface BondWriter {

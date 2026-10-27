@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DIRTY_BONDS_KEY, MAX_STORED_CHARS, browserBondStore, createBondStore, parseDirtyBonds, serializeDirtyBonds } from '../bondStore.ts';
 import type { StorageLike } from '../bondStore.ts';
-import { BondWriteError, MAX_DIRTY_ROWS, createBondWriter, isPermanentBondError, pairKey, raiseBond, recordBond, recoveryFor, sanitizePairRow } from '../bonds.ts';
+import { BondWriteError, MAX_DIRTY_ROWS, createBondWriter, isPermanentBondError, pairKey, preferBond, raiseBond, raiseBondsFromRows, recordBond, recoveryFor, sanitizePairRow } from '../bonds.ts';
 import type { BondMap, BondStore, PairRow, RecordBondDeps } from '../bonds.ts';
 
 /**
@@ -409,17 +409,67 @@ describe('H4 durable — a leftover row versus what the database has now', () =>
     expect(recoveryFor({ strength: 0 }, null)).toBe('write');
   });
 
-  it('raiseBond only ever raises, creates a missing bond, and leaves a namesake from another era alone', () => {
+  it('raiseBond only ever raises, creates a missing bond, and re-points a bond inherited from an earlier namesake', () => {
     const rels: BondMap = new Map([['Bramble', { withId: B.id, withName: 'Bramble', strength: 3, lastMessage: 'hi' }]]);
     expect(raiseBond(rels, B, 2)).toBe(false);
     expect(raiseBond(rels, B, 3)).toBe(false);
     expect(rels.get('Bramble')!.strength).toBe(3);
     expect(raiseBond(rels, B, 7)).toBe(true);
     expect(rels.get('Bramble')).toEqual({ withId: B.id, withName: 'Bramble', strength: 7, lastMessage: 'hi' });
-    expect(raiseBond(rels, { id: uuid(77), name: 'Bramble' }, 99)).toBe(false); // another Bramble: not this pair
-    expect(rels.get('Bramble')!.strength).toBe(7);
     expect(raiseBond(rels, C, 4)).toBe(true);
     expect(rels.get('Cedar')).toEqual({ withId: C.id, withName: 'Cedar', strength: 4, lastMessage: null });
+    // inherited from the table: the bond names an earlier era's Bramble; it is the same relationship, now with this Bramble
+    const inherited: BondMap = new Map([['Bramble', { withId: uuid(77), withName: 'Bramble', strength: 2, lastMessage: null }]]);
+    expect(raiseBond(inherited, B, 5)).toBe(true);
+    expect(inherited.get('Bramble')).toEqual({ withId: B.id, withName: 'Bramble', strength: 5, lastMessage: null });
+    const inheritedHigher: BondMap = new Map([['Bramble', { withId: uuid(77), withName: 'Bramble', strength: 9, lastMessage: null }]]);
+    expect(raiseBond(inheritedHigher, B, 5)).toBe(true); // re-pointed, strength kept (never lowered)
+    expect(inheritedHigher.get('Bramble')).toEqual({ withId: B.id, withName: 'Bramble', strength: 9, lastMessage: null });
+  });
+
+  it('raiseBondsFromRows raises BOTH sides, skips rows of other eras, never lowers, and works before or after the cache was loaded', () => {
+    const maps = new Map<string, BondMap>();
+    const relsOf = (id: string) => { let m = maps.get(id); if (!m) { m = new Map(); maps.set(id, m); } return m; };
+    const roster = [A, B];
+    const rows = [row(1, 2, 4), row(1, 99, 50), row(98, 99, 50)];
+    // before the cache has anything: the maps are created
+    expect(raiseBondsFromRows(rows, roster, relsOf)).toBe(1);
+    expect(maps.get(A.id)!.get('Bramble')).toEqual({ withId: B.id, withName: 'Bramble', strength: 4, lastMessage: null });
+    expect(maps.get(B.id)!.get('Alder')).toEqual({ withId: A.id, withName: 'Alder', strength: 4, lastMessage: null });
+    expect(maps.size).toBe(2); // the rows of another era created nothing
+    expect(raiseBondsFromRows(rows, roster, relsOf)).toBe(0); // idempotent
+    // the cache is then (re)loaded from the stale table, replacing the maps: re-applying brings the bond back
+    maps.set(A.id, new Map([['Bramble', { withId: uuid(77), withName: 'Bramble', strength: 2, lastMessage: null }]]));
+    maps.set(B.id, new Map([['Alder', { withId: uuid(78), withName: 'Alder', strength: 2, lastMessage: null }]]));
+    expect(raiseBondsFromRows(rows, roster, relsOf)).toBe(1);
+    expect(maps.get(A.id)!.get('Bramble')).toEqual({ withId: B.id, withName: 'Bramble', strength: 4, lastMessage: null });
+    expect(maps.get(B.id)!.get('Alder')).toEqual({ withId: A.id, withName: 'Alder', strength: 4, lastMessage: null });
+    // a loaded value above the row stays
+    maps.get(A.id)!.get('Bramble')!.strength = 6;
+    raiseBondsFromRows(rows, roster, relsOf);
+    expect(maps.get(A.id)!.get('Bramble')!.strength).toBe(6);
+  });
+
+  it('preferBond: the villager\'s own row beats an inherited one, then the stronger wins; the first candidate always wins', () => {
+    expect(preferBond(undefined, { strength: 1, own: false })).toBe(true);
+    expect(preferBond({ strength: 5, own: false }, { strength: 2, own: true })).toBe(true); // own era value, even if lower
+    expect(preferBond({ strength: 2, own: true }, { strength: 5, own: false })).toBe(false);
+    expect(preferBond({ strength: 2, own: false }, { strength: 5, own: false })).toBe(true);
+    expect(preferBond({ strength: 5, own: false }, { strength: 2, own: false })).toBe(false);
+    expect(preferBond({ strength: 3, own: true }, { strength: 3, own: true })).toBe(false);
+  });
+
+  it('an exchange of villagers whose bond was inherited from an earlier era writes ONE row, (self, other) of this era, from both sides', async () => {
+    const db = fakeDb();
+    const p = pageLoad(db, createBondStore(() => fakeStorage().storage));
+    const oldA = uuid(61), oldB = uuid(62);
+    p.deps.relsOf(A.id).set('Bramble', { withId: oldB, withName: 'Bramble', strength: 1, lastMessage: null }); // hydrated from the earlier era's row
+    p.deps.relsOf(B.id).set('Alder', { withId: oldA, withName: 'Alder', strength: 1, lastMessage: null });
+    await recordBond(p.deps, A, B, 1, 'hello');
+    expect([...db.table.keys()]).toEqual([keyOf(1, 2)]);
+    expect(db.table.get(keyOf(1, 2))?.strength).toBe(2);
+    expect(p.strength(A, 'Bramble')).toBe(2);
+    expect(p.strength(B, 'Alder')).toBe(2);
   });
 
   /**
@@ -435,9 +485,8 @@ describe('H4 durable — a leftover row versus what the database has now', () =>
     for (const r of p.writer.pendingRows()) {
       const stored = db.table.get(pairKey(r))?.strength ?? null;
       if (recoveryFor(r, stored) === 'drop') { p.writer.discard(pairKey(r)); continue; }
-      const [x, y] = [A, B, C].filter((v) => v.id === r.a_id || v.id === r.b_id);
-      if (x && y) { raiseBond(p.deps.relsOf(x.id), y, r.strength); raiseBond(p.deps.relsOf(y.id), x, r.strength); }
     }
+    raiseBondsFromRows(p.writer.pendingRows(), [A, B, C], p.deps.relsOf);
     await p.writer.retry();
     return p;
   }
@@ -499,7 +548,7 @@ describe('H4 durable — how simulation.ts wires it (source checks; it imports S
   const bondsSource = readFileSync(new URL('../bonds.ts', import.meta.url), 'utf8');
   const storeSource = readFileSync(new URL('../bondStore.ts', import.meta.url), 'utf8');
   const body = (name: string) => {
-    const at = source.indexOf(`private async ${name}(`);
+    const at = source.search(new RegExp(`private (async )?${name}\\(`));
     return source.slice(at, source.indexOf('\n  }\n', at));
   };
 
@@ -517,8 +566,11 @@ describe('H4 durable — how simulation.ts wires it (source checks; it imports S
   it('recovery compares with the database, raises the in-memory bonds, and flushes through the writer', () => {
     const b = body('recoverBonds');
     expect(b).toContain('recoveryFor(row, stored)');
-    expect(b).toContain('raiseBond(');
+    expect(b).toContain('this.raiseBondsFromPending(agents)');
     expect(b).toContain('this.bondWriter.retry()');
+    // the cache is re-raised after EVERY (re)load of it, so the order of flush and load does not matter
+    expect(body('hydrateRelationships')).toContain('this.raiseBondsFromPending(agents)');
+    expect(body('raiseBondsFromPending')).toContain('raiseBondsFromRows(');
     expect(source).toMatch(/throw new BondWriteError\(error\.message, error\.code, status\)/);
   });
 

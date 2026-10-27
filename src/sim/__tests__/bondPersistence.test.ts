@@ -139,7 +139,7 @@ describe('H4 / R7.1 — one side fails to persist', () => {
     const fast = writer.write(row(2)); // arrives while the first is still in flight
     release();
     await Promise.all([slow, fast]);
-    expect(written.at(-1)?.strength).toBe(2); // the latest strength is what the database ends with
+    expect(written[written.length - 1]?.strength).toBe(2); // the latest strength is what the database ends with
     expect(writer.dirty()).toEqual([]);
   });
 

@@ -5,7 +5,7 @@ import { ANIMAL_RESPAWN_TICKS, nextIdFor, step } from '../world.ts';
 import type { WorldObject } from '../world.ts';
 import { clearField, mkAgent, mkSnapshot } from './fixtures.ts';
 
-const ENGINE_FILES = ['world.ts', 'brain.ts', 'actions.ts', 'rotation.ts'];
+const ENGINE_FILES = ['world.ts', 'brain.ts', 'actions.ts', 'rotation.ts', 'bonds.ts', 'chronicle.ts', 'mind.ts'];
 const CLOCK_CALLS = ['Date.now', 'new Date', 'performance.now'];
 
 afterEach(() => {

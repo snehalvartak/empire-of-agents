@@ -174,7 +174,7 @@ function parseReply(content: string): BrainDecision {
   const type = parsed.action?.type;
   const data_ = (parsed.action?.data ?? {}) as Record<string, unknown>;
   const before = type ?? 'wait';
-  const action = sanitizeSingleAction(before, data_);
+  const action = sanitizeAction(before, data_);
   const fallback = action.type === 'wait' && before !== 'wait';
   return { thought: parsed.thought ?? '', action, fallback, rawReply: fallback ? content.slice(0, 300) : undefined };
 }
@@ -222,8 +222,4 @@ export async function callBrainWithRetry(
   }
 
   return first;
-}
-
-function sanitizeSingleAction(type: string, data_: Record<string, unknown>): ActionInput {
-  return sanitizeAction(type, data_);
 }

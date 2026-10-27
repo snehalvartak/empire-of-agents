@@ -1,3 +1,5 @@
+import { ACTION_DEFS } from './actions.ts';
+
 export type TerritoryId = 'forest' | 'valley' | 'hills';
 
 export interface GridPos {
@@ -237,6 +239,9 @@ export type ActionInput =
   | { type: 'plan'; data: { steps: ActionInput[] } }
   | { type: 'remember'; data: { kind: 'semantic' | 'episodic'; content: string } }
   | { type: 'wait'; data: Record<string, never> };
+
+/** Every action type, derived from the one definition table (ACTION_DEFS). */
+export const ACTION_TYPES = Object.keys(ACTION_DEFS) as ActionInput['type'][];
 
 export const BUILD_COSTS: Record<string, { wood: number; stone: number; gold: number }> = {
   house: { wood: 3, stone: 0, gold: 0 },
@@ -819,9 +824,23 @@ export function step(
     case 'wait':
       return { ok: true, message: 'You rest beside the road and watch the banners flutter.', events: [{ type: 'wait', message: `${agent.name} rests.` }] };
 
+    case 'plan':
+      // plans are unrolled into single steps by the simulation before step() runs
+      return { ok: false, message: 'A plan is carried out one step at a time, not as a single step.', events };
+
     default:
-      return { ok: false, message: 'Unknown action.', events };
+      return unhandledAction(action, events);
   }
+}
+
+/**
+ * Compile-time exhaustiveness check for step(): `action` is `never` only while
+ * every ActionInput type has a case above. Adding a type to the union without a
+ * handler fails typecheck here. At runtime it still reports garbage input.
+ */
+function unhandledAction(action: never, events: ActionResult['events']): ActionResult {
+  void action;
+  return { ok: false, message: 'Unknown action.', events };
 }
 
 export function availableActions(snapshot: WorldSnapshot, agent: AgentState): string[] {

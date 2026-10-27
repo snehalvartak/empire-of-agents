@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "reset-world": "node scripts/reset-world.mjs",
+    "harness": "node scripts/agent-loop-reliability.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {

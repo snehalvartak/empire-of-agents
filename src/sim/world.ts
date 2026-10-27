@@ -1,6 +1,10 @@
 import { ACTION_DEFS } from './actions.ts';
+import { ISLAND_MANIFEST_TOML } from './islandManifest.generated.ts';
+import { ENGINE_RULES_VERSION, fingerprint, parseManifest } from './manifest.ts';
+import type { ThrownCubeBehavior, WorldManifest } from './manifest.ts';
 
-export type TerritoryId = 'forest' | 'valley' | 'hills';
+/** Territory ids come from the world manifest (the island has 'forest', 'valley' and 'hills'). */
+export type TerritoryId = string;
 
 export interface GridPos {
   x: number;
@@ -37,7 +41,25 @@ export interface WorldObject {
   builtBy?: string;
 }
 
-export const GRID_SIZE = 24;
+/**
+ * Parses and validates a world manifest (SPEC section 6). Throws a ManifestError naming every
+ * problem when the text is not a valid world, so a bad manifest stops the app at startup rather
+ * than loading part of an island.
+ */
+export function loadIsland(text: string = ISLAND_MANIFEST_TOML): WorldManifest {
+  return parseManifest(text);
+}
+
+/** The island this build ships, loaded once. The sole source of territories, roads, seeds and the starting cast. */
+const ISLAND = loadIsland();
+
+/** Fingerprint of the island plus the engine rules version (R6.5); recorded on every checkpoint. */
+export const islandFingerprint = fingerprint(ISLAND, ENGINE_RULES_VERSION);
+
+export const GRID_SIZE = ISLAND.world.gridSize;
+
+/** Most villagers the world holds, from the manifest's max_villagers. */
+export const MAX_VILLAGERS = ISLAND.world.maxVillagers;
 
 export interface TerritoryDef {
   id: TerritoryId;
@@ -57,32 +79,14 @@ export type AnimalKind = (typeof ANIMAL_KINDS)[number];
  */
 export const ANIMAL_RESPAWN_TICKS = 170;
 
-export const TERRITORIES: TerritoryDef[] = [
-  {
-    id: 'forest',
-    name: 'Greenwood Forest',
-    color: '#22c55e',
-    offset: { x: 0, y: 0 },
-    size: 14,
-    description: 'Dense woodland. Trees stand thick here, and berry bushes grow in the shade.',
-  },
-  {
-    id: 'valley',
-    name: 'Golden Valley',
-    color: '#eab308',
-    offset: { x: 17, y: 0 },
-    size: 7,
-    description: 'Open plains of tall grass. Gold veins lie exposed in the earth.',
-  },
-  {
-    id: 'hills',
-    name: 'Stone Hills',
-    color: '#94a3b8',
-    offset: { x: 8, y: 17 },
-    size: 6,
-    description: 'Rocky highlands. Stone quarries are cut into the slopes.',
-  },
-];
+export const TERRITORIES: TerritoryDef[] = ISLAND.territories.map((t) => ({
+  id: t.id,
+  name: t.name,
+  color: t.color,
+  offset: { x: t.offset.x, y: t.offset.y },
+  size: t.size,
+  description: t.description,
+}));
 
 export function territoryDef(id: TerritoryId): TerritoryDef {
   return TERRITORIES.find((t) => t.id === id) ?? TERRITORIES[0];
@@ -106,48 +110,11 @@ export interface CivState {
   age: number; // 1..4
 }
 
-export const ROADS: Array<{ a: TerritoryId; b: TerritoryId; cells: GridPos[] }> = [
-  {
-    a: 'forest',
-    b: 'valley',
-    cells: [
-      { x: 14, y: 6 },
-      { x: 15, y: 6 },
-      { x: 16, y: 6 },
-      { x: 17, y: 6 },
-    ],
-  },
-  {
-    a: 'valley',
-    b: 'hills',
-    cells: [
-      { x: 16, y: 7 },
-      { x: 16, y: 8 },
-      { x: 16, y: 9 },
-      { x: 16, y: 10 },
-      { x: 16, y: 11 },
-      { x: 16, y: 12 },
-      { x: 16, y: 13 },
-      { x: 16, y: 14 },
-      { x: 16, y: 15 },
-      { x: 16, y: 16 },
-      { x: 15, y: 16 },
-      { x: 14, y: 16 },
-      { x: 13, y: 16 },
-    ],
-  },
-  {
-    a: 'hills',
-    b: 'forest',
-    cells: [
-      { x: 11, y: 14 },
-      { x: 10, y: 14 },
-      { x: 10, y: 15 },
-      { x: 10, y: 16 },
-      { x: 10, y: 17 },
-    ],
-  },
-];
+export const ROADS: Array<{ a: TerritoryId; b: TerritoryId; cells: GridPos[] }> = ISLAND.roads.map((r) => ({
+  a: r.from,
+  b: r.to,
+  cells: r.cells.map((c) => ({ x: c.x, y: c.y })),
+}));
 
 function inTerritory(p: GridPos, def: TerritoryDef): boolean {
   return (
@@ -286,71 +253,27 @@ export const BUILD_COSTS: Record<string, { wood: number; stone: number; gold: nu
   wonder: { wood: 6, stone: 8, gold: 6 },
 };
 
-/** Seeded resource nodes per territory */
+/** Seeded world objects, in manifest order with ids res_0, res_1, ... (depleted_objects rows reference these ids). */
 export function seedObjects(): WorldObject[] {
-  const objs: WorldObject[] = [];
-  let n = 0;
-  const add = (territory: TerritoryId, x: number, y: number, kind: WorldObject['kind']) => {
-    objs.push({ id: `res_${n++}`, territory, pos: { x, y }, kind });
-  };
-
-  // Greenwood Forest: clustered woodland, berry thickets, undergrowth
-  const trees: Array<[number, number]> = [
-    [2, 2], [3, 2], [2, 3], [3, 3], [4, 3], [3, 4],
-    [9, 3], [10, 3], [11, 4], [10, 4], [12, 5],
-    [4, 9], [5, 9], [5, 10], [6, 10], [5, 11], [6, 11], [4, 12],
-    [1, 7], [2, 8], [1, 9], [7, 5], [8, 5],
-    [11, 8], [12, 6], [12, 8], [8, 12], [9, 12], [9, 2], [11, 9],
-    [7, 13], [12, 12], [1, 12], [13, 3], [13, 9],
-  ];
-  trees.forEach(([x, y]) => add('forest', x, y, 'tree'));
-  const bushes: Array<[number, number]> = [
-    [2, 12], [12, 2], [6, 7], [9, 7], [3, 6], [11, 10], [1, 4], [7, 11],
-  ];
-  bushes.forEach(([x, y]) => add('forest', x, y, 'berry_bush'));
-  const shrubs: Array<[number, number]> = [
-    [4, 5], [8, 8], [11, 11], [2, 6], [9, 9], [6, 2], [13, 6], [4, 8], [10, 6], [7, 8],
-  ];
-  shrubs.forEach(([x, y]) => add('forest', x, y, 'shrub'));
-  const flowers: Array<[number, number]> = [
-    [5, 4], [8, 10], [3, 10], [11, 5], [6, 12], [12, 10], [2, 10], [9, 4],
-  ];
-  flowers.forEach(([x, y]) => add('forest', x, y, 'flower'));
-  add('forest', 7, 7, 'town_center');
-
-  // Golden Valley (offset 17,0, 7x7): gold veins, lone trees, meadow life
-  add('valley', 17 + 2, 2, 'gold_mine'); add('valley', 17 + 5, 3, 'gold_mine');
-  add('valley', 17 + 3, 5, 'gold_mine'); add('valley', 17 + 1, 4, 'gold_mine');
-  add('valley', 17 + 4, 1, 'tree'); add('valley', 17 + 1, 6, 'tree');
-  add('valley', 17 + 5, 5, 'tree');
-  add('valley', 17 + 2, 4, 'shrub'); add('valley', 17 + 4, 3, 'shrub');
-  add('valley', 17 + 3, 1, 'flower'); add('valley', 17 + 6, 2, 'flower');
-  add('valley', 17 + 5, 6, 'flower');
-  add('valley', 17 + 2, 0, 'sheep'); add('valley', 17 + 3, 0, 'sheep');
-  add('valley', 17 + 6, 4, 'sheep');
-  add('valley', 17 + 0, 2, 'deer');
-
-  // Stone Hills (offset 8,17): quarries, boulders, outcrops
-  add('hills', 8 + 1, 17 + 1, 'stone_mine'); add('hills', 8 + 4, 17 + 3, 'stone_mine');
-  add('hills', 8 + 1, 17 + 4, 'stone_mine'); add('hills', 8 + 5, 17 + 5, 'stone_mine');
-  add('hills', 8 + 3, 17 + 1, 'tree'); add('hills', 8 + 0, 17 + 2, 'tree');
-  add('hills', 8 + 5, 17 + 1, 'boulder'); add('hills', 8 + 2, 17 + 5, 'boulder');
-  add('hills', 8 + 3, 17 + 3, 'outcrop'); add('hills', 8 + 5, 17 + 4, 'outcrop');
-  add('hills', 8 + 0, 17 + 5, 'shrub');
-  add('hills', 8 + 1, 17 + 0, 'boar'); add('hills', 8 + 2, 17 + 0, 'boar');
-  add('hills', 8 + 5, 17 + 0, 'deer');
-
-  // woodland creatures in the deep forest
-  add('forest', 12, 11, 'deer'); add('forest', 1, 6, 'deer'); add('forest', 13, 12, 'boar');
-
-  // the Standing Rock — it does not gather, mine or burn. Villagers must learn what it does.
-  add('hills', 10, 19, 'rock');
-
-  // strange cubes scattered near the Town Center — free to pick up, place and throw
-  [[6, 8], [9, 8], [8, 9], [5, 6], [10, 10]].forEach(([x, y]) => add('forest', x, y, 'cube'));
-
-  return objs;
+  return ISLAND.seeds.map((o) => ({ id: o.id, territory: o.territory, pos: { x: o.pos.x, y: o.pos.y }, kind: o.kind }));
 }
+
+/** What a cube thrown at each mystery machine does, by the machine's object id (R6.2). */
+const THROWN_CUBE_BEHAVIOR = new Map<string, ThrownCubeBehavior>();
+for (const seed of ISLAND.seeds) {
+  const mystery = ISLAND.mysteries.find((m) => m.id === seed.mystery);
+  if (mystery) THROWN_CUBE_BEHAVIOR.set(seed.id, mystery.onThrownCube);
+}
+
+/** The villagers the world starts with (manifest [[starting_villagers]]). */
+export const STARTING_VILLAGERS: Array<{ name: string; persona: string; territory: TerritoryId; pos: GridPos; color: string }> =
+  ISLAND.startingVillagers.map((v) => ({
+    name: v.name,
+    persona: v.persona,
+    territory: v.territory,
+    pos: { x: v.pos.x, y: v.pos.y },
+    color: v.color ?? '#94a3b8',
+  }));
 
 const MAX_OBJECTS = 240;
 
@@ -710,7 +633,10 @@ export function step(
         const next = { x: cur.x + ux, y: cur.y + uy };
         if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE || !canStand(next)) break;
         // the rock occupies its tile, so a cube that reaches it strikes it instead of stopping short
-        rock = snapshot.objects.find((o) => o.kind === 'rock' && o.pos.x === next.x && o.pos.y === next.y);
+        // (only a machine whose manifest behavior reacts to cubes; otherwise it is plain ground the cube stops before)
+        rock = snapshot.objects.find(
+          (o) => o.kind === 'rock' && o.pos.x === next.x && o.pos.y === next.y && THROWN_CUBE_BEHAVIOR.get(o.id) === 'spawn_two_cubes'
+        );
         if (rock) {
           flew++;
           break;

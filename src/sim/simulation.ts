@@ -1,6 +1,18 @@
 import { supabase } from '@/lib/supabase';
 import type { ActionInput, AgentState, CivState, TerritoryId, WorldObject, WorldSnapshot } from './world';
-import { clearInbox, nextIdFor, observe, planSteps, runSteps, seedObjects, step, territoryAt } from './world';
+import {
+  MAX_VILLAGERS,
+  STARTING_VILLAGERS,
+  clearInbox,
+  islandFingerprint,
+  nextIdFor,
+  observe,
+  planSteps,
+  runSteps,
+  seedObjects,
+  step,
+  territoryAt,
+} from './world';
 import { callBrainWithRetry, systemPrompt } from './brain';
 import { pickNextActor } from './rotation';
 import { grantXp, sanitizeTraits } from './traits';
@@ -23,6 +35,11 @@ export interface SessionRow {
 }
 
 const MODELS_DEFAULT = 'deepseek/deepseek-v4.1-flash';
+
+/** "Alder", "Alder and Bramble", "A, B and C". */
+function joinNames(names: string[]): string {
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
 
 interface Goal {
   text: string;
@@ -369,6 +386,11 @@ class Simulation {
       this.emit();
       return;
     }
+    if (this.snapshot.agents.length >= MAX_VILLAGERS) {
+      this.error = `This world holds at most ${MAX_VILLAGERS} villagers and all ${MAX_VILLAGERS} places are taken. Dismiss a villager before recruiting another.`;
+      this.emit();
+      return;
+    }
     const { data, error } = await supabase
       .from('agents')
       .insert({
@@ -424,32 +446,22 @@ class Simulation {
 
   private async seedStartingVillagers(): Promise<boolean> {
     if (!this.session) return false;
+    const sessionId = this.session.id;
     const seeded = await supabase
       .from('agents')
-      .insert([
-        {
-          session_id: this.session.id,
-          name: 'Alder',
+      .insert(
+        STARTING_VILLAGERS.map((v) => ({
+          session_id: sessionId,
+          name: v.name,
           model: MODELS_DEFAULT,
-          color: '#e2b04a',
-          island: 'forest',
-          position: { x: 3, y: 3 },
-          persona: 'Restless and easily bored. Starts five things at once, finishes three.',
+          color: v.color,
+          island: v.territory,
+          position: { x: v.pos.x, y: v.pos.y },
+          persona: v.persona,
           mood: 'curious',
           status: 'idle',
-        },
-        {
-          session_id: this.session.id,
-          name: 'Bramble',
-          model: MODELS_DEFAULT,
-          color: '#4ade80',
-          island: 'valley',
-          position: { x: 4, y: 4 },
-          persona: 'Warm and talkative. Greets strangers, collects gossip, remembers birthdays.',
-          mood: 'curious',
-          status: 'idle',
-        },
-      ])
+        }))
+      )
       .select();
     if (seeded.error) {
       console.error('Seeding villagers failed:', seeded.error.message);
@@ -459,7 +471,7 @@ class Simulation {
       agent_id: null,
       island: null,
       type: 'system',
-      message: 'Alder and Bramble arrive to found the empire.',
+      message: `${joinNames(STARTING_VILLAGERS.map((v) => v.name))} arrive to found the empire.`,
     });
     return true;
   }
@@ -696,6 +708,8 @@ class Simulation {
           objects: s.objects,
           civ: s.civ,
           nextId: s.nextId,
+          // R6.5: restore refuses a checkpoint whose world fingerprint differs (checkFingerprint)
+          fingerprint: islandFingerprint,
         },
       },
       { onConflict: 'session_id,tick' }

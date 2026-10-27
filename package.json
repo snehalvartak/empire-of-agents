@@ -5,12 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "manifest": "node scripts/build-manifest.mjs",
+    "prebuild": "npm run manifest",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "reset-world": "node scripts/reset-world.mjs",
     "harness": "node scripts/agent-loop-reliability.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "pretest": "npm run manifest",
     "test": "vitest run"
   },
   "dependencies": {
@@ -19,6 +22,7 @@
     "lucide-react": "^0.446.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "smol-toml": "1.9.1",
     "three": "^0.186.1"
   },
   "devDependencies": {

@@ -17,7 +17,7 @@ import { soundOn, setSoundOn, playEventSound } from '@/lib/sounds';
 import { VoxelWorld } from '@/components/VoxelWorld';
 import { AgentAvatar } from '@/components/AgentAvatar';
 import type { TerritoryId, WorldSnapshot } from '@/sim/world';
-import { AGE_COSTS, AGE_NAMES, TERRITORIES, seedObjects } from '@/sim/world';
+import { AGE_COSTS, AGE_NAMES, MAX_VILLAGERS, TERRITORIES, seedObjects } from '@/sim/world';
 
 interface EventRow {
   id: string;
@@ -729,9 +729,14 @@ export default function WorldApp() {
                     className="mt-2 w-full rounded-lg border border-amber-900/50 bg-[#0f0b07] px-3 py-2 text-sm text-amber-50 outline-none focus:border-amber-600/60"
                   />
                 </div>
+                {agents.length >= MAX_VILLAGERS && (
+                  <p className="text-xs text-red-300">
+                    This world holds at most {MAX_VILLAGERS} villagers and every place is taken. Dismiss a villager to make room.
+                  </p>
+                )}
                 <button
                   onClick={() => void addAgent()}
-                  disabled={adding || !name.trim()}
+                  disabled={adding || !name.trim() || agents.length >= MAX_VILLAGERS}
                   className="w-full rounded-lg border border-amber-600/60 bg-amber-600/90 py-2 text-sm font-bold text-[#1a140d] hover:bg-amber-500 disabled:opacity-40"
                 >
                   {adding ? 'Recruiting...' : 'Join the empire'}

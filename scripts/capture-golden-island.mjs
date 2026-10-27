@@ -7,8 +7,9 @@
  * test (src/sim/__tests__/manifest.test.ts) compares the loaded island against.
  *
  * Do not re-run it against the manifest-driven world.ts: it would capture the new code
- * instead of the old and the parity proof would be circular. It is kept so the golden
- * file's provenance is reviewable. (It still runs on a checkout from before T3.)
+ * instead of the old and the parity proof would be circular (and it can no longer find the
+ * cast literals in simulation.ts). It is kept so the golden file's provenance is reviewable;
+ * it runs only on a checkout from before T3.
  *
  * Usage (on the pre-manifest commit): node scripts/capture-golden-island.mjs
  */

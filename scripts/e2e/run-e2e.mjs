@@ -204,7 +204,7 @@ async function scenarioA() {
   check('realtime: the app opened /realtime/v1 websockets, the gateway refused them, and the page still loaded without an uncaught error',
     gw.realtimeAttempts.length >= 1 && pageErrors.length === 0, `attempts=${gw.realtimeAttempts.length} pageErrors=${json(pageErrors)}`);
   const settingsReq = gw.log.find((e) => e.method === 'GET' && /\/rest\/v1\/settings\?/.test(e.url));
-  note(`app load reads \`settings\` (resetWorldOnDeploy) as anon: PostgREST answers ${settingsReq?.status} because the lock migration revoked anon's grants; the deploy-version stamp can therefore never be read or written`);
+  check('the app does not touch the locked settings table on load (the old deploy-version reset was removed)', !settingsReq, `request=${json(settingsReq ?? null)}`);
 
   // end the (empty) era: the archive path, the stub-model title, and a continue button with nothing to continue from
   await p1.locator('header').getByRole('button', { name: /End session/ }).click();
@@ -421,8 +421,8 @@ async function scenarioSingleDriver() {
   const t1Events = q(`SELECT count(*)::int AS n FROM events WHERE session_id=${lit(era)}`)[0].n;
   const p1PositionWrites = requestsOf('p1', (e) => e.method === 'POST' && tableOf(e) === 'agent_positions' && e.at >= gw.log.find((x) => x.page === 'p2')?.at).length;
   const p2Writes = requestsOf('p2', isWrite);
-  const unexpected = p2Writes.filter((e) => !(e.method === 'POST' && tableOf(e) === 'settings'));
-  check('p2 sent no write to the era: its only non-GET request is the denied settings stamp', unexpected.length === 0, unexpected.map((e) => `${e.method} ${e.url} ${e.status}`).join('\n'));
+  const unexpected = p2Writes;
+  check('p2 (the watcher) sent no write at all: no non-GET request to the backend', unexpected.length === 0, unexpected.map((e) => `${e.method} ${e.url} ${e.status}`).join('\n'));
   check('p2 wrote no positions, events, checkpoints, agents or memories (0 POST/PATCH/DELETE on those tables from p2)',
     p2Writes.filter((e) => ['agent_positions', 'events', 'checkpoints', 'agents', 'memories', 'civ', 'structures', 'depleted_objects', 'relationships'].includes(tableOf(e))).length === 0);
   check(`the database grew at p1's pace while p2 watched: +${t1Ticks - t0Ticks} ticks, ${p1PositionWrites} position inserts from p1 since p2 opened, none from p2`, t1Ticks > t0Ticks && t1Events > t0Events);
@@ -647,7 +647,7 @@ async function scenarioAnon() {
   const sPost = await call('POST', '/settings', { id: 'e2e', openrouter_key: 'sk-test' });
   check('RECORD: anon can NOT read or write `settings` (the lock migration): GET and POST are refused with 401 / 42501 permission denied, so the OpenRouter key is not exposed',
     sGet.status === 401 && sGet.data?.code === '42501' && sGet2.status === 401 && sPost.status === 401, json([sGet.status, sGet.data, sGet2.status, sPost.status]));
-  note(`settings as anon: GET ${sGet.status} ${sGet.data?.code} "${sGet.data?.message}"; the app's deploy-version read and stamp (src/sim/reset.ts) therefore fail on every load`);
+  note(`settings as anon: GET ${sGet.status} ${sGet.data?.code} "${sGet.data?.message}"; the browser therefore cannot read or stamp it; the app no longer tries (the old deploy-version reset was removed)`);
   const anyWrite = q("SELECT count(*)::int AS n FROM settings WHERE id='e2e'")[0].n;
   check('settings: the refused insert wrote nothing', anyWrite === 0);
   const badJwt = await fetch(`${gw.url}/rest/v1/sessions?select=id&limit=1`, { headers: { Authorization: 'Bearer not.a.jwt', apikey: 'x' } });

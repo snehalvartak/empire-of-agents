@@ -12,7 +12,6 @@ import { Panel } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
 import type { SessionRow } from '@/sim/simulation';
-import { resetWorldOnDeploy } from '@/sim/reset';
 import { soundOn, setSoundOn, playEventSound } from '@/lib/sounds';
 import { VoxelWorld } from '@/components/VoxelWorld';
 import { AgentAvatar } from '@/components/AgentAvatar';
@@ -255,7 +254,6 @@ export default function WorldApp() {
   }
 
   async function loadAll() {
-    await resetWorldOnDeploy();
     await sim.load();
     setSessionId(sim.session?.id ?? null);
     setSessionTitle(sim.session?.title ?? null);

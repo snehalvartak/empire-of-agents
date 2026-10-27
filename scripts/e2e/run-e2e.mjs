@@ -708,6 +708,136 @@ async function scenarioAnon() {
   console.log(`      fork memory filter as sent by the browser:\n        GET ${memFilter.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, (m) => m.slice(0, 8))}`);
 }
 
+// =============================================================================================== g) a failed bond write survives a reload
+const DIRTY_KEY = 'empire:dirty-bonds:v1'; // src/sim/bondStore.ts
+const dirtyRows = async (page) => {
+  const raw = await page.evaluate((k) => localStorage.getItem(k), DIRTY_KEY);
+  return raw === null ? null : JSON.parse(raw).rows;
+};
+/** The relationships upserts the page sent since log index `since`, with the row each carried. */
+const relUpserts = (since, page = null) => gw.log.slice(since)
+  .filter((e) => e.method === 'POST' && /\/rest\/v1\/relationships\?/.test(e.url) && (!page || e.page === page))
+  .map((e) => ({ status: e.status, fault: Boolean(e.fault), page: e.page, row: JSON.parse(e.body) }));
+
+async function scenarioBondRetry() {
+  section('g) a bond write fails (503), the page is reloaded: the dirty row survives and the database converges (R7.1)');
+  const p = S.p2;
+  const era = S.fork.id;
+  const names = MANIFEST.startingVillagers.map((v) => v.name);
+  // arrangement (test setup, not behaviour under test): stand both villagers where the world starts them, diagonally
+  // adjacent with nothing unheard, so one scripted chat is possible; the reload makes the app read that from the database
+  for (const v of MANIFEST.startingVillagers) {
+    x(`UPDATE agents SET position=${lit(json({ x: v.pos.x, y: v.pos.y }))}::jsonb, inbox='[]'::jsonb WHERE session_id=${lit(era)} AND name=${lit(v.name)}`);
+  }
+  const reloadApp = async (page) => {
+    await page.reload();
+    await page.locator('header').getByText(/Now playing:/).waitFor({ timeout: 30000 });
+    await waitVillagers(page);
+  };
+  await reloadApp(p);
+  console.log('DBG agents', json(q(`SELECT id, session_id, name, position FROM agents ORDER BY created_at`)), 'DBG rels', json(q('SELECT a_id,b_id,strength,session_id FROM relationships')), 'ERA', era);
+  check('setup: nothing is left in the dirty-bond store before the scenario starts', (await dirtyRows(p)) === null, json(await dirtyRows(p)));
+  const chatScript = (text) => gw.scriptNext((r) => {
+    const m = /Standing right beside you[^:]*: ([A-Za-z]+) \(([0-9a-f]{8})\)/.exec(r.observation);
+    return m ? { thought: `I chat with ${m[1]}.`, action: { type: 'chat', data: { agent_id: m[2], message: text } } } : null;
+  });
+  const oneTurn = async (label) => {
+    const t0 = maxTick(era);
+    await btn(p, 'Slow').click(); // 6 s between turns: room to halt after exactly one
+    const mark = gw.log.length;
+    const brainMark = gw.brainRequests.length;
+    await btn(p, 'Begin').click();
+    const turn = await nextBrain(brainMark);
+    check(`${label}: the turn's observation lists the other villager beside the actor, so the scripted chat is possible`, /Standing right beside you/.test(turn.observation) && turn.scripted === true, `${turn.actor}: ${turn.observation.slice(0, 700)}`);
+    await waitFor(`${label}: the turn is written`, () => maxTick(era) > t0, { timeout: 30000, interval: 50 });
+    return mark;
+  };
+  const pairWhere = (r) => `a_id=${lit(r.a_id)} AND b_id=${lit(r.b_id)}`;
+
+  // 1) a healthy chat: the pair's row exists in the database at the strength the app wrote
+  chatScript('Good morning, friend.');
+  const mark1 = await oneTurn('healthy chat');
+  const healthy = await waitFor('the healthy chat\'s relationship upserts', () => { const u = relUpserts(mark1); return u.length >= 2 && u.every((x2) => x2.status !== 0) ? u : null; }, { timeout: 15000, interval: 50 })
+    .catch((err) => { throw new Error(`${err.message}\nrequests since the turn began:\n${gw.log.slice(mark1).map((e) => `${e.page} ${e.method} ${decodeURIComponent(e.url).slice(0, 110)} -> ${e.status}`).join('\n')}`); });
+  await haltAndSettle(p, era, 'p2 (healthy chat)');
+  const pair = { a_id: healthy[0].row.a_id, b_id: healthy[0].row.b_id };
+  const S1 = healthy[healthy.length - 1].row.strength;
+  check('healthy chat: both upserts were answered 2xx and the database holds the pair at the strength the app wrote',
+    healthy.every((u) => u.status >= 200 && u.status < 300) && q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0]?.strength === S1 && S1 >= 1, json([healthy.map((u) => [u.status, u.row.strength]), S1]));
+  check('healthy chat: nothing is left in localStorage (the row was saved before the request and removed when it succeeded)', (await dirtyRows(p)) === null, json(await dirtyRows(p)));
+
+  // 2) the database is "down" for relationships writes (the gateway answers 503, PostgREST never sees them): the other villager answers
+  const fault = gw.failNext({ table: 'relationships', methods: ['POST', 'PATCH'], count: 100, status: 503 });
+  const errorsBefore = consoleErrors.length;
+  chatScript('And a good morning to you.');
+  const mark2 = await oneTurn('chat while relationships writes fail');
+  await waitFor('the failing writes', () => fault.hits >= 2, { timeout: 15000, interval: 50 });
+  await haltAndSettle(p, era, 'p2 (faulted chat)');
+  const failed = relUpserts(mark2).filter((u) => u.fault);
+  check(`the app's relationship writes for the second chat got HTTP 503 (${failed.length} of them) and carried strength ${S1 + 1} = ${S1} + 1 for the same pair`,
+    failed.length >= 2 && failed.every((u) => u.status === 503 && u.row.strength === S1 + 1 && u.row.a_id === pair.a_id && u.row.b_id === pair.b_id), json(failed));
+  check(`DB: the bond is STALE — the database still holds ${S1}, not ${S1 + 1}`, q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0]?.strength === S1);
+  const stored = await dirtyRows(p);
+  check(`localStorage['${DIRTY_KEY}'] holds exactly the dirty row: the pair, strength ${S1 + 1}, the era`,
+    stored && stored.length === 1 && stored[0].a_id === pair.a_id && stored[0].b_id === pair.b_id && stored[0].strength === S1 + 1 && stored[0].session_id === era, json(stored));
+  check('the stored text holds ids, strength and timestamps only', stored && json(Object.keys(stored[0]).sort()) === json(['a_id', 'b_id', 'last_chat_at', 'session_id', 'strength']));
+  check('the failed writes were logged by the app (console.error), one per request, and nothing else broke', consoleErrors.length - errorsBefore >= fault.hits && pageErrors.length === 0);
+  S.bondRetryErrors = consoleErrors.length - errorsBefore;
+
+  // 3) the page is reloaded with the database healthy again; nobody presses Begin
+  gw.clearFaults();
+  const mark3 = gw.log.length;
+  await reloadApp(p);
+  await expectWait(`DB: after the reload the pair's row converged to ${S1 + 1}`, () => q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0]?.strength === S1 + 1, { timeout: 20000, interval: 100 });
+  await expectWait('localStorage: the dirty row is gone once the write succeeded', async () => (await dirtyRows(p)) === null, { timeout: 10000, interval: 100 });
+  const recovery = relUpserts(mark3, 'p2');
+  const readBack = gw.log.slice(mark3).find((e) => e.page === 'p2' && e.method === 'GET' && /\/rest\/v1\/relationships\?select=strength/.test(e.url) && e.url.includes(`a_id=eq.${pair.a_id}`));
+  check(`the reloaded app compared with the database first (GET relationships?select=strength for the pair) and then sent ONE upsert with strength ${S1 + 1}, answered 2xx`,
+    Boolean(readBack) && recovery.length === 1 && recovery[0].status >= 200 && recovery[0].status < 300 && recovery[0].row.strength === S1 + 1, json([readBack?.url, recovery]));
+  check('this window was not the driver while it recovered (no Begin pressed, lease free): a free, not-watching window may write', eraRow(era).driver_id === null);
+  // the in-memory bond was repaired too, not only the row: the next turn's prompt shows S1 + 1, where the stale database said S1
+  await btn(p, SPEED).click();
+  const markBrain = gw.brainRequests.length;
+  await btn(p, 'Begin').click();
+  const turn = await nextBrain(markBrain);
+  const other = names.find((n) => n !== turn.actor);
+  check(`the next turn's prompt (${turn.actor}) shows "${other}: bond ${S1 + 1}" — the in-memory bond was raised to the persisted strength, not left at the stale ${S1}`,
+    turn.system.includes(`- ${other}: bond ${S1 + 1}`), (turn.system.match(/- [A-Za-z]+: bond \d+/g) ?? []).join(' | '));
+  await haltAndSettle(p, era, 'p2 (after recovery)');
+
+  // 4) a watching window loads the dirty row but never writes it; it recovers when it takes the lease over
+  const BIG = 10000; // a fabricated, impossibly high strength: the row is written only if strictly higher than the database's
+  const dbNow = q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0].strength;
+  x(`UPDATE sessions SET driver_id='e2e-other-driver', driver_heartbeat_at=now() WHERE id=${lit(era)}`);
+  const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: { 'x-e2e-page': 'p3' } });
+  await ctx3.addInitScript(({ key, row }) => {
+    try {
+      if (!sessionStorage.getItem('e2e-seeded')) { sessionStorage.setItem('e2e-seeded', '1'); localStorage.setItem(key, JSON.stringify({ v: 1, rows: [row] })); }
+    } catch { /* storage unavailable */ }
+  }, { key: DIRTY_KEY, row: { ...pair, strength: BIG, last_chat_at: new Date().toISOString(), session_id: era } });
+  const mark4 = gw.log.length;
+  const p3 = await openApp(ctx3, 'p3');
+  S.p3 = p3;
+  await waitVillagers(p3);
+  check('p3 opened while "another window" holds the lease: the watch banner is shown', await p3.getByText(WATCH_BANNER).isVisible());
+  await sleep(3000);
+  check('p3 (the watcher) sent no write at all and made no relationships request (it holds the dirty row but does not flush it)',
+    requestsOf('p3', isWrite).length === 0 && gw.log.slice(mark4).filter((e) => e.page === 'p3' && tableOf(e) === 'relationships').length === 0,
+    gw.log.slice(mark4).filter((e) => e.page === 'p3' && isWrite(e)).map((e) => `${e.method} ${e.url}`).join('\n'));
+  check(`DB: the pair is unchanged while p3 watches (${dbNow}, not ${BIG}), and the row is still in p3's localStorage`,
+    q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0].strength === dbNow && (await dirtyRows(p3))?.[0]?.strength === BIG);
+  x(`UPDATE sessions SET driver_id=NULL, driver_heartbeat_at=NULL WHERE id=${lit(era)}`);
+  const mark5 = gw.log.length;
+  await btn(p3, 'Try to take over').click();
+  await p3.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 });
+  await expectWait(`DB: once p3 took the lease over, the persisted ${BIG} (strictly higher than ${dbNow}) was written`, () => q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0].strength >= BIG, { timeout: 20000, interval: 100 });
+  await expectWait('p3: the dirty row is gone from its localStorage', async () => (await dirtyRows(p3)) === null, { timeout: 10000, interval: 100 });
+  check(`p3's upsert for the pair carried exactly strength ${BIG}, sent after the takeover claim`, relUpserts(mark5, 'p3').some((u) => u.row.strength === BIG && u.status >= 200 && u.status < 300), json(relUpserts(mark5, 'p3')));
+  await haltAndSettle(p3, era, 'p3');
+  await shot(p3, 'g1-bond-retry');
+  await ctx3.close();
+}
+
 // =============================================================================================== the run
 async function main() {
   outDir = makeOutDir();
@@ -734,6 +864,7 @@ async function main() {
     ['b (checkpoint)', scenarioCheckpoint, 'c'],
     ['e', scenarioFork, 'b (checkpoint)'],
     ['f', scenarioAnon, null],
+    ['g (bond retry)', scenarioBondRetry, 'e'],
   ];
   const failed = new Set();
   const only = (process.env.E2E_ONLY || '').split(',').filter(Boolean); // development aid: E2E_ONLY="a,d (chat)"
@@ -750,7 +881,8 @@ async function main() {
     }
   }
   check('no uncaught exception in any page', pageErrors.length === 0, pageErrors.join('\n'));
-  const noisy = consoleErrors.filter((e) => !/WebSocket connection|Failed to load resource/.test(e));
+  // the app logs each failed relationship write; scenario g injected them on purpose (and counted them above)
+  const noisy = consoleErrors.filter((e) => !/WebSocket connection|Failed to load resource|relationship upsert failed: gateway: injected 503/.test(e));
   check('no unexpected console.error in any page (websocket refusals and the 401 settings reads excepted)', noisy.length === 0, noisy.slice(0, 6).join('\n'));
   note(`console errors seen: ${consoleErrors.length} (all "WebSocket connection ... failed" from the refused realtime, or the 401 on settings)`);
 }

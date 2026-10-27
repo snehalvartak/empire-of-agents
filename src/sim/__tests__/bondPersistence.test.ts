@@ -164,7 +164,7 @@ describe('H4 — the happy path is unchanged', () => {
   it('H4: simulation.ts persists bonds through the writer with the existing upsert on (a_id, b_id)', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('../simulation.ts', import.meta.url), 'utf8');
-    expect(source).toContain('createBondWriter((row) => this.persistBond(row))');
+    expect(source).toContain('createBondWriter((row) => this.persistBond(row), browserBondStore())'); // the store argument was added by the durable retry set (bondStore.test.ts)
     expect(source).toMatch(/from\('relationships'\)\.upsert\(row, \{ onConflict: 'a_id,b_id' \}\)/);
     expect(source.match(/from\('relationships'\)\s*\.(upsert|update|insert)/g)?.length ?? 0).toBeLessThanOrEqual(1);
   });

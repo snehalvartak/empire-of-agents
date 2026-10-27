@@ -29,7 +29,8 @@ import type { EraScope, MemoryRow } from './memory';
 import { pickNextActor } from './rotation';
 import { agentStateFromRow, agentStatePatch, carriedPatch, cursorFromRow, cursorPatch } from './persisted';
 import { eventsForResult, planEndRow } from './chronicle';
-import { bondExchange, createBondWriter, recordBond } from './bonds';
+import { BondWriteError, bondExchange, createBondWriter, pairKey, raiseBond, recordBond, recoveryFor } from './bonds';
+import { browserBondStore } from './bondStore';
 import type { Bond, BondExchange, PairRow } from './bonds';
 import { grantXp, sanitizeTraits } from './traits';
 import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, leaseReleaseRequest, toIso } from './driver';
@@ -140,8 +141,11 @@ class Simulation {
   private depleted = new Map<string, number | null>();
   private forking = false;
   private relationshipsCache = new Map<string, Map<string, RelationshipRow>>();
-  /** Persists bond rows; a row that fails stays dirty and is retried on the next bond write (R7.1, bonds.ts). */
-  private bondWriter = createBondWriter((row) => this.persistBond(row));
+  /**
+   * Persists bond rows; a row that fails stays dirty and is retried on the next bond write (R7.1, bonds.ts).
+   * The dirty set is kept in localStorage (bondStore.ts), so it survives a reload; `recoverBonds` flushes it.
+   */
+  private bondWriter = createBondWriter((row) => this.persistBond(row), browserBondStore());
   private actionHistory = new Map<string, Array<{ label: string; result: string }>>();
   private turnCounts = new Map<string, number>();
   private waitCounts = new Map<string, number>();
@@ -604,6 +608,7 @@ class Simulation {
       ...carriedOf(row),
     }));
     await this.hydrateRelationships(agents);
+    await this.recoverBonds(agents);
 
     if (!keepLive) {
       // the exact next actor: the cursor saved after the last turn, checked against the roster we just loaded
@@ -846,6 +851,51 @@ class Simulation {
     }
   }
 
+  /**
+   * Bond writes that were still dirty when the last page closed (or that failed in this window and were
+   * then overwritten by the reload of the cache) come back here, right after the cache was hydrated from
+   * the database and before any turn can bump a bond. Only the driver's window, or a free one, may write
+   * (a watcher keeps them and recovers when it takes the lease over: `start` reloads the world).
+   * For each row: the pair's strength is read from the database; a row that is not strictly higher is
+   * stale and dropped (bonds only grow, so the higher strength is the later: `recoveryFor`), otherwise the
+   * in-memory bonds of both villagers are raised to it (so the next exchange builds on it instead of on the
+   * stale database value) and the row is written once. A row the database cannot take for good (a villager
+   * that no longer exists: foreign-key violation) is dropped by the writer; a transient failure keeps it.
+   */
+  private async recoverBonds(agents: AgentState[]) {
+    if (this.readOnly) return;
+    const rows = this.bondWriter.pendingRows();
+    if (rows.length === 0) return;
+    for (const row of rows) {
+      const stored = await this.storedBondStrength(row.a_id, row.b_id);
+      if (stored === undefined) continue; // cannot tell right now: keep the row, it is retried with the next write
+      if (recoveryFor(row, stored) === 'drop') {
+        this.bondWriter.discard(pairKey(row));
+        continue;
+      }
+      const a = agents.find((v) => v.id === row.a_id);
+      const b = agents.find((v) => v.id === row.b_id);
+      const relsA = a && this.relationshipsCache.get(a.id);
+      const relsB = b && this.relationshipsCache.get(b.id);
+      if (a && b && relsA && relsB) {
+        raiseBond(relsA, b, row.strength);
+        raiseBond(relsB, a, row.strength);
+      }
+    }
+    await this.bondWriter.retry();
+  }
+
+  /** The strength the database holds for a pair: a number, null when there is no row, undefined when it could not be read. */
+  private async storedBondStrength(aId: string, bId: string): Promise<number | null | undefined> {
+    try {
+      const { data, error } = await supabase.from('relationships').select('strength').eq('a_id', aId).eq('b_id', bId).maybeSingle();
+      if (error) return undefined;
+      return typeof data?.strength === 'number' ? data.strength : null;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async getRelationships(agent: AgentState): Promise<RelationshipRow[]> {
     const cached = this.relationshipsCache.get(agent.id);
     if (cached) return [...cached.values()].sort((x, y) => y.strength - x.strength);
@@ -918,10 +968,11 @@ class Simulation {
    * writer keeps the pair dirty.
    */
   private async persistBond(row: PairRow) {
-    const { error } = await supabase.from('relationships').upsert(row, { onConflict: 'a_id,b_id' });
+    const { error, status } = await supabase.from('relationships').upsert(row, { onConflict: 'a_id,b_id' });
     if (error) {
       console.error('relationship upsert failed:', error.message);
-      throw new Error(error.message);
+      // the SQLSTATE (error.code) decides whether the writer keeps the row or drops it (isPermanentBondError)
+      throw new BondWriteError(error.message, error.code, status);
     }
   }
 

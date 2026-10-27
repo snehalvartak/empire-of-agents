@@ -11,6 +11,9 @@
  *   /realtime/v1                -> websocket upgrades are REFUSED (404): Supabase Realtime is not available here
  *   OPTIONS anywhere            -> CORS preflight answered (the app and the gateway are different origins)
  *
+ * Fault injection (OFF by default; only a scenario that asks for it): failNext() makes the next N matching
+ * /rest/v1 requests answer 503 from the gateway itself, without reaching PostgREST, so the database never sees them.
+ *
  * Everything that passes is logged (method, URL exactly as the client sent it, status, a short body
  * snippet, and the `x-e2e-page` header the driver adds per browser context), so a test can show the
  * real HTTP the supabase-js client generated.
@@ -30,6 +33,8 @@ export function startGateway({ postgrestUrl, anonKey, port = 0 }) {
   const upstream = new URL(postgrestUrl);
   /** One-shot override of the scripted villager (see scriptNext). */
   let nextScript = null;
+  /** Armed faults (none unless a scenario calls failNext): { table, methods, remaining, status, hits }. */
+  const faults = [];
 
   const cors = (req) => ({
     'Access-Control-Allow-Origin': '*',
@@ -72,6 +77,15 @@ export function startGateway({ postgrestUrl, anonKey, port = 0 }) {
       const path = req.url.split('?')[0];
 
       if (path.startsWith('/rest/v1/') || path === '/rest/v1') {
+        const table = (/^\/rest\/v1\/([a-z_]+)/.exec(path) ?? [])[1] ?? null;
+        const fault = faults.find((f) => f.remaining > 0 && f.table === table && f.methods.includes(req.method));
+        if (fault) {
+          fault.remaining--;
+          fault.hits++;
+          record(req, fault.status, body, { fault: true });
+          json(req, res, fault.status, { message: `gateway: injected ${fault.status} (e2e fault injection)` });
+          return;
+        }
         const headers = { ...req.headers, host: upstream.host };
         delete headers.connection;
         delete headers['x-e2e-page'];
@@ -185,6 +199,17 @@ export function startGateway({ postgrestUrl, anonKey, port = 0 }) {
          * to answer that request, or null to leave it to the stub and be asked again on the next request.
          */
         scriptNext: (fn) => { nextScript = fn; },
+        /**
+         * Fault injection, off by default: the next `count` requests with one of `methods` to /rest/v1/<table> are answered
+         * with `status` (default 503) by the gateway and never reach PostgREST. Returns the fault, whose `hits` counts the
+         * requests it failed so far. clearFaults() disarms everything.
+         */
+        failNext: ({ table, methods = ['POST', 'PATCH'], count = 1, status = 503 }) => {
+          const fault = { table, methods, remaining: count, status, hits: 0 };
+          faults.push(fault);
+          return fault;
+        },
+        clearFaults: () => { faults.length = 0; },
         settings,
         stop: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }),
       });

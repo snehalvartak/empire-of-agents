@@ -103,6 +103,7 @@ export default function WorldApp() {
   const [memories, setMemories] = useState<MemoryRow[]>([]);
   const [civ, setCiv] = useState<CivRow>({ wood: 0, food: 0, gold: 0, stone: 0, age: 1 });
   const [running, setRunning] = useState(sim.running);
+  const [driverNote, setDriverNote] = useState<string | null>(sim.driverNote);
   const [speed, setSpeed] = useState(sim.speed);
   const [error, setError] = useState<string | null>(sim.error);
   const [tick, setTick] = useState(0);
@@ -156,6 +157,7 @@ export default function WorldApp() {
     void loadAll();
     const unsub = sim.subscribe(() => {
       setRunning(sim.running);
+      setDriverNote(sim.driverNote);
       setSpeed(sim.speed);
       setError(sim.error);
       setTick(sim.snapshot.tick);
@@ -485,11 +487,11 @@ export default function WorldApp() {
                   </button>
                 ) : (
                   <button
-                    onClick={() => sim.start()}
+                    onClick={() => void sim.start()}
                     disabled={agents.length === 0}
                     className="rounded-lg border border-amber-600/60 bg-amber-600/90 px-4 py-1.5 text-sm font-bold text-[#1a140d] hover:bg-amber-500 disabled:opacity-40"
                   >
-                    Begin
+                    {driverNote ? 'Try to take over' : 'Begin'}
                   </button>
                 )}
                 <button
@@ -639,6 +641,12 @@ export default function WorldApp() {
             )}
           </div>
 
+          {viewing === 'live' && driverNote && (
+            <p className="rounded-lg border border-amber-700/40 bg-amber-900/20 px-3 py-2 text-xs text-amber-200">
+              {driverNote}
+            </p>
+          )}
+
           {viewing === 'live' && (
             <div className="flex items-center gap-2 text-xs text-amber-100/60">
               <span>Chronicle pace:</span>
@@ -646,7 +654,8 @@ export default function WorldApp() {
                 <button
                   key={s}
                   onClick={() => sim.setSpeed(s)}
-                  className={`rounded-md px-2.5 py-1 capitalize ${
+                  disabled={!!driverNote}
+                  className={`rounded-md px-2.5 py-1 capitalize disabled:opacity-40 ${
                     speed === s
                       ? 'bg-amber-600/30 text-amber-200'
                       : 'hover:bg-amber-900/30'
@@ -736,7 +745,7 @@ export default function WorldApp() {
                 )}
                 <button
                   onClick={() => void addAgent()}
-                  disabled={adding || !name.trim() || agents.length >= MAX_VILLAGERS}
+                  disabled={adding || !name.trim() || agents.length >= MAX_VILLAGERS || !!driverNote}
                   className="w-full rounded-lg border border-amber-600/60 bg-amber-600/90 py-2 text-sm font-bold text-[#1a140d] hover:bg-amber-500 disabled:opacity-40"
                 >
                   {adding ? 'Recruiting...' : 'Join the empire'}
@@ -813,7 +822,8 @@ export default function WorldApp() {
                   {viewing === 'live' && (
                     <button
                       onClick={() => void sim.removeAgent(a.id)}
-                      className="rounded-md px-2 py-1 text-xs text-amber-100/40 hover:bg-red-950/40 hover:text-red-300"
+                      disabled={!!driverNote}
+                      className="rounded-md px-2 py-1 text-xs text-amber-100/40 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-40"
                     >
                       Dismiss
                     </button>

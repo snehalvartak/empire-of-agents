@@ -16,6 +16,7 @@ import {
 import { callBrainWithRetry, systemPrompt } from './brain';
 import { pickNextActor } from './rotation';
 import { grantXp, sanitizeTraits } from './traits';
+import { DRIVER_HEARTBEAT_MS, decideLease, leaseClaimFilter, toIso } from './driver';
 
 export interface SessionRow {
   id: string;
@@ -32,6 +33,18 @@ export interface SessionRow {
   stone: number | null;
   age: number | null;
   carry_memories: boolean;
+  /** Single-driver lease (R7.6): the window driving the tick loop and its last heartbeat. */
+  driver_id?: string | null;
+  driver_heartbeat_at?: string | null;
+}
+
+const WATCHING_NOTE = 'Another window is driving this era — you are watching.';
+
+/** One random id per Simulation instance (letters, digits and hyphens only). */
+function makeDriverId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  return Array.from({ length: 4 }, () => Math.random().toString(16).slice(2, 10).padEnd(8, '0')).join('-');
 }
 
 const MODELS_DEFAULT = 'deepseek/deepseek-v4.1-flash';
@@ -95,6 +108,13 @@ class Simulation {
   error: string | null = null;
   focusAgent: string | null = null;
   session: SessionRow | null = null;
+  /** True while another window holds the driver lease: this window only watches (R7.6). */
+  readOnly = false;
+  driverNote: string | null = null;
+  private driverId = makeDriverId();
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private inFlight: Promise<void> | null = null;
+  private starting = false;
   private listeners = new Set<Listener>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private memoriesCache = new Map<string, string[]>();
@@ -108,6 +128,14 @@ class Simulation {
   /** Turn-order cursor (R7.5): who acted last, and the roster index they held. */
   private lastActorId: string | null = null;
   private lastActorIndex = 0;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      const release = () => void this.releaseLease();
+      window.addEventListener('pagehide', release);
+      window.addEventListener('beforeunload', release);
+    }
+  }
 
   subscribe(fn: Listener) {
     this.listeners.add(fn);
@@ -139,6 +167,7 @@ class Simulation {
       .maybeSingle();
     if (live) {
       this.session = live as SessionRow;
+      this.syncDriverState();
       return;
     }
 
@@ -160,6 +189,8 @@ class Simulation {
       return;
     }
     this.session = created as SessionRow;
+    this.readOnly = false;
+    this.driverNote = null;
     await this.logEvent({
       agent_id: null,
       island: null,
@@ -171,7 +202,16 @@ class Simulation {
   /** Ends the live session, stamping final stats and a story title. */
   async endSession(): Promise<string | null> {
     if (!this.session || this.session.status === 'archived') return null;
-    this.stop();
+    this.pauseLoop();
+    this.emit();
+    await this.inFlight;
+    // archiving writes to the era, so only its driver may do it (R7.6): claim, or refuse
+    if ((await this.claimLease()) !== 'claimed') {
+      this.stopHeartbeat();
+      this.emit();
+      return null;
+    }
+    this.stopHeartbeat();
     const sid = this.session.id;
     const snap = this.snapshot;
     const seq = this.session.seq;
@@ -189,10 +229,13 @@ class Simulation {
         gold: snap.civ.gold,
         stone: snap.civ.stone,
         age: snap.civ.age,
+        driver_id: null,
+        driver_heartbeat_at: null,
       })
       .eq('id', sid);
     if (error) {
       this.error = 'Could not archive the session.';
+      void this.releaseLease();
       this.emit();
       return null;
     }
@@ -209,6 +252,8 @@ class Simulation {
   /** Starts a fresh session (previous one must be archived first). */
   async startSession(carryMemories: boolean): Promise<boolean> {
     this.stop();
+    this.readOnly = false;
+    this.driverNote = null;
     this.memoriesCache.clear();
     this.lastActorId = null;
     this.lastActorIndex = 0;
@@ -223,6 +268,11 @@ class Simulation {
     this.emit();
     await this.resumeOrCreateSession();
     if (!this.session) return false;
+    if (this.readOnly) {
+      // a live era is already being driven elsewhere: show it, seed and change nothing
+      await this.loadWorld();
+      return true;
+    }
     if (!carryMemories) {
       await supabase.from('sessions').update({ carry_memories: false }).eq('id', this.session.id);
       this.session.carry_memories = false;
@@ -278,7 +328,7 @@ class Simulation {
       return;
     }
 
-    if (!agentRows || agentRows.length === 0) {
+    if ((!agentRows || agentRows.length === 0) && !this.readOnly) {
       const seeded = await this.seedStartingVillagers();
       if (!seeded) {
         this.error = 'Could not seed the starting villagers. Reload the page to retry.';
@@ -381,6 +431,7 @@ class Simulation {
     island: TerritoryId;
     persona: string;
   }) {
+    if (!(await this.mayEditRoster())) return;
     if (!this.session) {
       this.error = 'No live session.';
       this.emit();
@@ -422,6 +473,7 @@ class Simulation {
   }
 
   async removeAgent(id: string) {
+    if (!(await this.mayEditRoster())) return;
     await supabase.from('agents').delete().eq('id', id);
     this.memoriesCache.delete(id);
     await this.loadWorld();
@@ -430,6 +482,7 @@ class Simulation {
   /** Archival reset: used by the deploy hook. Ends the live session; data is kept. */
   async resetWorld() {
     await this.endSession();
+    if (this.readOnly) return; // another window drives the era: leave this watcher's view alone
     this.memoriesCache.clear();
     this.lastActorId = null;
     this.lastActorIndex = 0;
@@ -482,6 +535,7 @@ class Simulation {
     type: string;
     message: string;
   }) {
+    if (this.readOnly) return; // watchers never write to the era (R7.6)
     await supabase.from('events').insert({
       session_id: this.session?.id ?? null,
       agent_id: e.agent_id,
@@ -616,19 +670,159 @@ class Simulation {
     }
   }
 
-  start() {
-    if (this.running) return;
-    this.running = true;
-    this.error = null;
-    this.schedule();
-    this.emit();
+  /**
+   * Claims the single-driver lease (R7.6), then runs the loop. If another window
+   * drives the era the claim is denied: nothing runs and this window only watches.
+   * Calling it again is the retry.
+   */
+  async start() {
+    if (this.running || this.starting) return;
+    this.starting = true;
+    try {
+      const wasWatching = this.readOnly;
+      if ((await this.claimLease()) !== 'claimed') {
+        this.emit();
+        return;
+      }
+      // taking over from a watching view: reload, so the loop starts from what the last driver saved
+      if (wasWatching) await this.loadWorld();
+      this.running = true;
+      this.error = null;
+      this.startHeartbeat();
+      // a tick still draining from an earlier stop() schedules the next one itself
+      if (!this.inFlight) this.schedule();
+      this.emit();
+    } finally {
+      this.starting = false;
+    }
   }
 
   stop() {
+    this.pauseLoop();
+    void this.releaseWhenIdle();
+    this.emit();
+  }
+
+  private pauseLoop() {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.emit();
+  }
+
+  /** What a watcher sees when the lease is not its own. */
+  private markReadOnly() {
+    this.readOnly = true;
+    this.driverNote = WATCHING_NOTE;
+  }
+
+  /** On opening a live era: watch it if a live driver holds it, otherwise stay free to start. */
+  private syncDriverState() {
+    if (!this.session) return;
+    const verdict = decideLease(
+      { driver_id: this.session.driver_id ?? null, driver_heartbeat_at: this.session.driver_heartbeat_at ?? null },
+      this.driverId,
+      Date.now()
+    );
+    if (verdict === 'denied') this.markReadOnly();
+    else {
+      this.readOnly = false;
+      this.driverNote = null;
+    }
+  }
+
+  /**
+   * One conditional UPDATE, never read-then-write: it matches only when nobody
+   * drives the era, I do, or the driver's heartbeat is stale, and returns the row
+   * it changed. Zero rows back means another driver holds the lease.
+   */
+  private async claimLease(): Promise<'claimed' | 'denied' | 'error'> {
+    if (!this.session) return 'error';
+    const now = Date.now();
+    const { data, error } = await supabase
+      .from('sessions')
+      .update({ driver_id: this.driverId, driver_heartbeat_at: toIso(now) })
+      .eq('id', this.session.id)
+      .or(leaseClaimFilter(this.driverId, now))
+      .select();
+    if (error) {
+      this.error = 'Could not check whether another window is driving this era.';
+      return 'error';
+    }
+    if (!data || data.length === 0) {
+      this.markReadOnly();
+      return 'denied';
+    }
+    this.session = { ...this.session, ...(data[0] as SessionRow) };
+    this.readOnly = false;
+    this.driverNote = null;
+    return 'claimed';
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.heartbeat = setInterval(() => void this.renewLease(), DRIVER_HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  /** Renews while running; zero rows updated means someone else took the lease, so stop at once. */
+  private async renewLease() {
+    if (!this.session) return;
+    const { data, error } = await supabase
+      .from('sessions')
+      .update({ driver_heartbeat_at: toIso(Date.now()) })
+      .eq('id', this.session.id)
+      .eq('driver_id', this.driverId)
+      .select('id');
+    if (error) return; // transient: the next beat retries
+    if (!data || data.length === 0) {
+      this.pauseLoop();
+      this.stopHeartbeat();
+      this.markReadOnly();
+      this.emit();
+    }
+  }
+
+  /** Best-effort: frees the lease only if it is still mine. */
+  private async releaseLease() {
+    if (!this.session) return;
+    try {
+      await supabase
+        .from('sessions')
+        .update({ driver_id: null, driver_heartbeat_at: null })
+        .eq('id', this.session.id)
+        .eq('driver_id', this.driverId);
+    } catch {
+      // best-effort: a lease that is not released simply times out
+    }
+  }
+
+  /** Lets a tick in progress finish writing before the lease is given up. */
+  private async releaseWhenIdle() {
+    await this.inFlight;
+    if (this.running || this.starting) return; // started again meanwhile
+    this.stopHeartbeat();
+    await this.releaseLease();
+  }
+
+  /** Roster edits write to the era, so only the driver (or a window nobody else drives) may make them. */
+  private async mayEditRoster(): Promise<boolean> {
+    if (!this.readOnly && this.session && !this.running) {
+      const { data } = await supabase
+        .from('sessions')
+        .select('driver_id, driver_heartbeat_at')
+        .eq('id', this.session.id)
+        .maybeSingle();
+      if (data && decideLease(data, this.driverId, Date.now()) === 'denied') this.markReadOnly();
+    }
+    if (this.readOnly) {
+      this.emit();
+      return false;
+    }
+    return true;
   }
 
   setSpeed(s: 'slow' | 'normal' | 'fast') {
@@ -638,7 +832,13 @@ class Simulation {
 
   private schedule() {
     if (!this.running) return;
-    this.timer = setTimeout(() => void this.tick(), this.delay());
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.inFlight = this.tick().finally(() => {
+        this.inFlight = null;
+      });
+    }, this.delay());
   }
 
   /** Hunger rises and energy drains with every tick; recovering is the villager's own business. */
@@ -670,6 +870,9 @@ class Simulation {
       agent.status = 'idle';
       this.error = err instanceof Error ? err.message : 'Simulation error';
     }
+
+    // the lease was lost during this turn: write nothing more (R7.6)
+    if (this.readOnly) return;
 
     // remember where this villager has been, so wander seeks fresh ground
     agent.recentTiles = [...(agent.recentTiles ?? []), { ...agent.pos }].slice(-24);
@@ -827,6 +1030,7 @@ class Simulation {
   ): Promise<import('./world').ActionResult> {
     const result = step(this.snapshot, agent.id, action);
     agent.island = territoryAt(agent.pos) ?? agent.island;
+    if (this.readOnly) return result; // lease lost mid-turn: no persistence from here (R7.6)
 
     await this.logEvent({
       agent_id: agent.id,

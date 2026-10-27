@@ -1,0 +1,1500 @@
+{
+ "gridSize": 24,
+ "tiles": [
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "water",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "road",
+   "road",
+   "road",
+   "valley+road",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley",
+   "valley"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "forest",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "road",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "road",
+   "water",
+   "water",
+   "road",
+   "road",
+   "road",
+   "road",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills+road",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "hills",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ],
+  [
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water",
+   "water"
+  ]
+ ],
+ "territories": [
+  {
+   "id": "forest",
+   "name": "Greenwood Forest",
+   "color": "#22c55e",
+   "offset": {
+    "x": 0,
+    "y": 0
+   },
+   "size": 14,
+   "description": "Dense woodland. Trees stand thick here, and berry bushes grow in the shade."
+  },
+  {
+   "id": "valley",
+   "name": "Golden Valley",
+   "color": "#eab308",
+   "offset": {
+    "x": 17,
+    "y": 0
+   },
+   "size": 7,
+   "description": "Open plains of tall grass. Gold veins lie exposed in the earth."
+  },
+  {
+   "id": "hills",
+   "name": "Stone Hills",
+   "color": "#94a3b8",
+   "offset": {
+    "x": 8,
+    "y": 17
+   },
+   "size": 6,
+   "description": "Rocky highlands. Stone quarries are cut into the slopes."
+  }
+ ],
+ "roads": [
+  {
+   "from": "forest",
+   "to": "valley",
+   "cells": [
+    {
+     "x": 14,
+     "y": 6
+    },
+    {
+     "x": 15,
+     "y": 6
+    },
+    {
+     "x": 16,
+     "y": 6
+    },
+    {
+     "x": 17,
+     "y": 6
+    }
+   ]
+  },
+  {
+   "from": "valley",
+   "to": "hills",
+   "cells": [
+    {
+     "x": 16,
+     "y": 7
+    },
+    {
+     "x": 16,
+     "y": 8
+    },
+    {
+     "x": 16,
+     "y": 9
+    },
+    {
+     "x": 16,
+     "y": 10
+    },
+    {
+     "x": 16,
+     "y": 11
+    },
+    {
+     "x": 16,
+     "y": 12
+    },
+    {
+     "x": 16,
+     "y": 13
+    },
+    {
+     "x": 16,
+     "y": 14
+    },
+    {
+     "x": 16,
+     "y": 15
+    },
+    {
+     "x": 16,
+     "y": 16
+    },
+    {
+     "x": 15,
+     "y": 16
+    },
+    {
+     "x": 14,
+     "y": 16
+    },
+    {
+     "x": 13,
+     "y": 16
+    }
+   ]
+  },
+  {
+   "from": "hills",
+   "to": "forest",
+   "cells": [
+    {
+     "x": 11,
+     "y": 14
+    },
+    {
+     "x": 10,
+     "y": 14
+    },
+    {
+     "x": 10,
+     "y": 15
+    },
+    {
+     "x": 10,
+     "y": 16
+    },
+    {
+     "x": 10,
+     "y": 17
+    }
+   ]
+  }
+ ],
+ "objects": [
+  {
+   "id": "res_0",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 2,
+   "y": 2
+  },
+  {
+   "id": "res_1",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 3,
+   "y": 2
+  },
+  {
+   "id": "res_2",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 2,
+   "y": 3
+  },
+  {
+   "id": "res_3",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 3,
+   "y": 3
+  },
+  {
+   "id": "res_4",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 4,
+   "y": 3
+  },
+  {
+   "id": "res_5",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 3,
+   "y": 4
+  },
+  {
+   "id": "res_6",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 9,
+   "y": 3
+  },
+  {
+   "id": "res_7",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 10,
+   "y": 3
+  },
+  {
+   "id": "res_8",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 11,
+   "y": 4
+  },
+  {
+   "id": "res_9",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 10,
+   "y": 4
+  },
+  {
+   "id": "res_10",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 12,
+   "y": 5
+  },
+  {
+   "id": "res_11",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 4,
+   "y": 9
+  },
+  {
+   "id": "res_12",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 5,
+   "y": 9
+  },
+  {
+   "id": "res_13",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 5,
+   "y": 10
+  },
+  {
+   "id": "res_14",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 6,
+   "y": 10
+  },
+  {
+   "id": "res_15",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 5,
+   "y": 11
+  },
+  {
+   "id": "res_16",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 6,
+   "y": 11
+  },
+  {
+   "id": "res_17",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 4,
+   "y": 12
+  },
+  {
+   "id": "res_18",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 1,
+   "y": 7
+  },
+  {
+   "id": "res_19",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 2,
+   "y": 8
+  },
+  {
+   "id": "res_20",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 1,
+   "y": 9
+  },
+  {
+   "id": "res_21",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 7,
+   "y": 5
+  },
+  {
+   "id": "res_22",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 8,
+   "y": 5
+  },
+  {
+   "id": "res_23",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 11,
+   "y": 8
+  },
+  {
+   "id": "res_24",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 12,
+   "y": 6
+  },
+  {
+   "id": "res_25",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 12,
+   "y": 8
+  },
+  {
+   "id": "res_26",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 8,
+   "y": 12
+  },
+  {
+   "id": "res_27",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 9,
+   "y": 12
+  },
+  {
+   "id": "res_28",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 9,
+   "y": 2
+  },
+  {
+   "id": "res_29",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 11,
+   "y": 9
+  },
+  {
+   "id": "res_30",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 7,
+   "y": 13
+  },
+  {
+   "id": "res_31",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 12,
+   "y": 12
+  },
+  {
+   "id": "res_32",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 1,
+   "y": 12
+  },
+  {
+   "id": "res_33",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 13,
+   "y": 3
+  },
+  {
+   "id": "res_34",
+   "territory": "forest",
+   "kind": "tree",
+   "x": 13,
+   "y": 9
+  },
+  {
+   "id": "res_35",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 2,
+   "y": 12
+  },
+  {
+   "id": "res_36",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 12,
+   "y": 2
+  },
+  {
+   "id": "res_37",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 6,
+   "y": 7
+  },
+  {
+   "id": "res_38",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 9,
+   "y": 7
+  },
+  {
+   "id": "res_39",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 3,
+   "y": 6
+  },
+  {
+   "id": "res_40",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 11,
+   "y": 10
+  },
+  {
+   "id": "res_41",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 1,
+   "y": 4
+  },
+  {
+   "id": "res_42",
+   "territory": "forest",
+   "kind": "berry_bush",
+   "x": 7,
+   "y": 11
+  },
+  {
+   "id": "res_43",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 4,
+   "y": 5
+  },
+  {
+   "id": "res_44",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 8,
+   "y": 8
+  },
+  {
+   "id": "res_45",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 11,
+   "y": 11
+  },
+  {
+   "id": "res_46",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 2,
+   "y": 6
+  },
+  {
+   "id": "res_47",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 9,
+   "y": 9
+  },
+  {
+   "id": "res_48",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 6,
+   "y": 2
+  },
+  {
+   "id": "res_49",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 13,
+   "y": 6
+  },
+  {
+   "id": "res_50",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 4,
+   "y": 8
+  },
+  {
+   "id": "res_51",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 10,
+   "y": 6
+  },
+  {
+   "id": "res_52",
+   "territory": "forest",
+   "kind": "shrub",
+   "x": 7,
+   "y": 8
+  },
+  {
+   "id": "res_53",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 5,
+   "y": 4
+  },
+  {
+   "id": "res_54",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 8,
+   "y": 10
+  },
+  {
+   "id": "res_55",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 3,
+   "y": 10
+  },
+  {
+   "id": "res_56",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 11,
+   "y": 5
+  },
+  {
+   "id": "res_57",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 6,
+   "y": 12
+  },
+  {
+   "id": "res_58",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 12,
+   "y": 10
+  },
+  {
+   "id": "res_59",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 2,
+   "y": 10
+  },
+  {
+   "id": "res_60",
+   "territory": "forest",
+   "kind": "flower",
+   "x": 9,
+   "y": 4
+  },
+  {
+   "id": "res_61",
+   "territory": "forest",
+   "kind": "town_center",
+   "x": 7,
+   "y": 7
+  },
+  {
+   "id": "res_62",
+   "territory": "valley",
+   "kind": "gold_mine",
+   "x": 19,
+   "y": 2
+  },
+  {
+   "id": "res_63",
+   "territory": "valley",
+   "kind": "gold_mine",
+   "x": 22,
+   "y": 3
+  },
+  {
+   "id": "res_64",
+   "territory": "valley",
+   "kind": "gold_mine",
+   "x": 20,
+   "y": 5
+  },
+  {
+   "id": "res_65",
+   "territory": "valley",
+   "kind": "gold_mine",
+   "x": 18,
+   "y": 4
+  },
+  {
+   "id": "res_66",
+   "territory": "valley",
+   "kind": "tree",
+   "x": 21,
+   "y": 1
+  },
+  {
+   "id": "res_67",
+   "territory": "valley",
+   "kind": "tree",
+   "x": 18,
+   "y": 6
+  },
+  {
+   "id": "res_68",
+   "territory": "valley",
+   "kind": "tree",
+   "x": 22,
+   "y": 5
+  },
+  {
+   "id": "res_69",
+   "territory": "valley",
+   "kind": "shrub",
+   "x": 19,
+   "y": 4
+  },
+  {
+   "id": "res_70",
+   "territory": "valley",
+   "kind": "shrub",
+   "x": 21,
+   "y": 3
+  },
+  {
+   "id": "res_71",
+   "territory": "valley",
+   "kind": "flower",
+   "x": 20,
+   "y": 1
+  },
+  {
+   "id": "res_72",
+   "territory": "valley",
+   "kind": "flower",
+   "x": 23,
+   "y": 2
+  },
+  {
+   "id": "res_73",
+   "territory": "valley",
+   "kind": "flower",
+   "x": 22,
+   "y": 6
+  },
+  {
+   "id": "res_74",
+   "territory": "valley",
+   "kind": "sheep",
+   "x": 19,
+   "y": 0
+  },
+  {
+   "id": "res_75",
+   "territory": "valley",
+   "kind": "sheep",
+   "x": 20,
+   "y": 0
+  },
+  {
+   "id": "res_76",
+   "territory": "valley",
+   "kind": "sheep",
+   "x": 23,
+   "y": 4
+  },
+  {
+   "id": "res_77",
+   "territory": "valley",
+   "kind": "deer",
+   "x": 17,
+   "y": 2
+  },
+  {
+   "id": "res_78",
+   "territory": "hills",
+   "kind": "stone_mine",
+   "x": 9,
+   "y": 18
+  },
+  {
+   "id": "res_79",
+   "territory": "hills",
+   "kind": "stone_mine",
+   "x": 12,
+   "y": 20
+  },
+  {
+   "id": "res_80",
+   "territory": "hills",
+   "kind": "stone_mine",
+   "x": 9,
+   "y": 21
+  },
+  {
+   "id": "res_81",
+   "territory": "hills",
+   "kind": "stone_mine",
+   "x": 13,
+   "y": 22
+  },
+  {
+   "id": "res_82",
+   "territory": "hills",
+   "kind": "tree",
+   "x": 11,
+   "y": 18
+  },
+  {
+   "id": "res_83",
+   "territory": "hills",
+   "kind": "tree",
+   "x": 8,
+   "y": 19
+  },
+  {
+   "id": "res_84",
+   "territory": "hills",
+   "kind": "boulder",
+   "x": 13,
+   "y": 18
+  },
+  {
+   "id": "res_85",
+   "territory": "hills",
+   "kind": "boulder",
+   "x": 10,
+   "y": 22
+  },
+  {
+   "id": "res_86",
+   "territory": "hills",
+   "kind": "outcrop",
+   "x": 11,
+   "y": 20
+  },
+  {
+   "id": "res_87",
+   "territory": "hills",
+   "kind": "outcrop",
+   "x": 13,
+   "y": 21
+  },
+  {
+   "id": "res_88",
+   "territory": "hills",
+   "kind": "shrub",
+   "x": 8,
+   "y": 22
+  },
+  {
+   "id": "res_89",
+   "territory": "hills",
+   "kind": "boar",
+   "x": 9,
+   "y": 17
+  },
+  {
+   "id": "res_90",
+   "territory": "hills",
+   "kind": "boar",
+   "x": 10,
+   "y": 17
+  },
+  {
+   "id": "res_91",
+   "territory": "hills",
+   "kind": "deer",
+   "x": 13,
+   "y": 17
+  },
+  {
+   "id": "res_92",
+   "territory": "forest",
+   "kind": "deer",
+   "x": 12,
+   "y": 11
+  },
+  {
+   "id": "res_93",
+   "territory": "forest",
+   "kind": "deer",
+   "x": 1,
+   "y": 6
+  },
+  {
+   "id": "res_94",
+   "territory": "forest",
+   "kind": "boar",
+   "x": 13,
+   "y": 12
+  },
+  {
+   "id": "res_95",
+   "territory": "hills",
+   "kind": "rock",
+   "x": 10,
+   "y": 19
+  },
+  {
+   "id": "res_96",
+   "territory": "forest",
+   "kind": "cube",
+   "x": 6,
+   "y": 8
+  },
+  {
+   "id": "res_97",
+   "territory": "forest",
+   "kind": "cube",
+   "x": 9,
+   "y": 8
+  },
+  {
+   "id": "res_98",
+   "territory": "forest",
+   "kind": "cube",
+   "x": 8,
+   "y": 9
+  },
+  {
+   "id": "res_99",
+   "territory": "forest",
+   "kind": "cube",
+   "x": 5,
+   "y": 6
+  },
+  {
+   "id": "res_100",
+   "territory": "forest",
+   "kind": "cube",
+   "x": 10,
+   "y": 10
+  }
+ ],
+ "cast": [
+  {
+   "name": "Alder",
+   "persona": "Restless and easily bored. Starts five things at once, finishes three.",
+   "territory": "forest",
+   "color": "#e2b04a",
+   "x": 3,
+   "y": 3
+  },
+  {
+   "name": "Bramble",
+   "persona": "Warm and talkative. Greets strangers, collects gossip, remembers birthdays.",
+   "territory": "valley",
+   "color": "#4ade80",
+   "x": 4,
+   "y": 4
+  }
+ ],
+ "maxVillagers": null
+}

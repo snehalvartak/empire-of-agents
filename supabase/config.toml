@@ -1,0 +1,4 @@
+project_id = "rtmycyexpfjjagclbqlo"
+
+[functions.agent-brain]
+verify_jwt = false

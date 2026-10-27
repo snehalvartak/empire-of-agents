@@ -182,6 +182,8 @@ export interface AgentState {
   traits?: Record<string, { level: number; xp: number }>;
   goals?: Array<{ text: string; createdAt: number }>;
   relationships?: Array<{ withId: string; withName: string; strength: number; lastMessage: string | null }>;
+  /** In-memory only: last tiles this villager stood on, newest last. Drives wander. */
+  recentTiles?: GridPos[];
 }
 
 export interface WorldSnapshot {
@@ -202,6 +204,7 @@ export type ActionInput =
   | { type: 'say'; data: { message: string } }
   | { type: 'chat'; data: { agent_id: string; message: string } }
   | { type: 'gift'; data: { agent_id: string; item?: string } }
+  | { type: 'wander'; data: Record<string, never> }
   | { type: 'eat'; data: Record<string, never> }
   | { type: 'train'; data: { ability: string } }
   | { type: 'pick_up'; data: { object_id: string } }
@@ -758,6 +761,39 @@ export function step(
       };
     }
 
+    case 'wander': {
+      const recent = new Set((agent.recentTiles ?? []).map((p) => `${p.x},${p.y}`));
+      const options = [
+        { x: agent.pos.x + 1, y: agent.pos.y },
+        { x: agent.pos.x - 1, y: agent.pos.y },
+        { x: agent.pos.x, y: agent.pos.y + 1 },
+        { x: agent.pos.x, y: agent.pos.y - 1 },
+      ].filter(
+        (p) =>
+          p.x >= 0 && p.y >= 0 && p.x < GRID_SIZE && p.y < GRID_SIZE &&
+          (territoryAt(p) || isRoad(p)) &&
+          !snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === p.x && a.pos.y === p.y)
+      );
+      if (options.length === 0) {
+        return { ok: false, message: 'Every step around you is blocked. There is nowhere to wander.', events };
+      }
+      const fresh = options.filter((p) => !recent.has(`${p.x},${p.y}`));
+      const pool = fresh.length ? fresh : options;
+      const next = pool[Math.floor(Math.random() * pool.length)];
+      const ddx = next.x - agent.pos.x;
+      const ddy = next.y - agent.pos.y;
+      const prevT = territoryAt(agent.pos);
+      agent.pos = next;
+      const nowT = territoryAt(next);
+      let msg = `You wander ${dirName(ddx, ddy)} to (${next.x}, ${next.y}), off the beaten path.`;
+      if (nowT && nowT !== prevT) msg += ` You arrive in ${territoryDef(nowT).name}.`;
+      return {
+        ok: true,
+        message: msg,
+        events: [{ type: 'wander', message: `${agent.name} wandered to (${next.x}, ${next.y})`, data: { pos: next } }],
+      };
+    }
+
     case 'wait':
       return { ok: true, message: 'You rest beside the road and watch the banners flutter.', events: [{ type: 'wait', message: `${agent.name} rests.` }] };
 
@@ -795,6 +831,31 @@ export function availableActions(snapshot: WorldSnapshot, agent: AgentState): st
     const nearest = gatherables.slice().sort((a, b) => cheb(a) - cheb(b))[0];
     acts.push(`- goto (${nearest.pos.x},${nearest.pos.y}): nearest ${nearest.kind.replace('_', ' ')}, ${manhattan(nearest.pos)} steps away`);
   }
+  // exploration: the Standing Rock, strange cubes, the roads, and unvisited ground
+  const rock = snapshot.objects.find((o) => o.kind === 'rock');
+  if (rock && cheb(rock) > 1) {
+    acts.push(`- goto (${rock.pos.x},${rock.pos.y}): the Standing Rock, ${manhattan(rock.pos)} steps away — rumor says it reacts to thrown cubes`);
+  }
+  if (!agent.inventory.includes('cube')) {
+    const cube = snapshot.objects
+      .filter((o) => o.kind === 'cube')
+      .sort((a, b) => cheb(a) - cheb(b))[0];
+    if (cube) {
+      acts.push(`- goto (${cube.pos.x},${cube.pos.y}): a strange cube, ${manhattan(cube.pos)} steps away (pick_up, then place or throw)`);
+    }
+  }
+  const here = territoryAt(agent.pos);
+  const nearestRoadCell = ROADS
+    .flatMap((r) => r.cells.map((c) => ({ c, r })))
+    .sort((x, y) => manhattan(x.c) - manhattan(y.c))[0];
+  if (nearestRoadCell && manhattan(nearestRoadCell.c) > 2 && !isRoad(agent.pos)) {
+    const dest = [nearestRoadCell.r.a, nearestRoadCell.r.b]
+      .filter((t) => t !== here)
+      .map((t) => territoryDef(t).name)
+      .join(' or ');
+    acts.push(`- goto (${nearestRoadCell.c.x},${nearestRoadCell.c.y}): the road, ${manhattan(nearestRoadCell.c)} steps away — it leads toward ${dest}`);
+  }
+  acts.push('- wander: step onto ground you have not stood on recently — the best way to find what no map shows');
   acts.push('- wait: rest');
   return acts;
 }
@@ -836,6 +897,15 @@ export function observe(
         .join('; ')
     : 'nothing of interest';
   lines.push(`You see nearby: ${nearbyStr}.`);
+  const beyond = TERRITORIES.filter((t) => t.id !== territoryAt(agent.pos)).map((t) => {
+    const cx = t.offset.x + Math.floor(t.size / 2);
+    const cy = t.offset.y + Math.floor(t.size / 2);
+    const dx = cx - agent.pos.x;
+    const dy = cy - agent.pos.y;
+    const dir = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'east' : 'west') : (dy > 0 ? 'south' : 'north');
+    return `${t.name} to the ${dir} (${Math.abs(dx) + Math.abs(dy)} steps)`;
+  });
+  if (beyond.length) lines.push(`Beyond this land: ${beyond.join('; ')}.`);
   const othersStr = others.length
     ? others.map((a) => `${a.name} (${a.mood}) in ${territoryDef(a.island).name} at (${a.pos.x},${a.pos.y})`).join('; ')
     : 'no other villagers';

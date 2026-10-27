@@ -637,6 +637,9 @@ class Simulation {
       this.error = err instanceof Error ? err.message : 'Simulation error';
     }
 
+    // remember where this villager has been, so wander seeks fresh ground
+    agent.recentTiles = [...(agent.recentTiles ?? []), { ...agent.pos }].slice(-24);
+
     this.snapshot.tick++;
     await this.updateAgentRow(agent);
     await this.persistNeeds(agent);
@@ -908,6 +911,8 @@ class Simulation {
       agent.mood = 'talkative';
     } else if (action.type === 'remember' || action.type === 'discover') {
       agent.mood = 'thoughtful';
+    } else if (action.type === 'wander') {
+      agent.mood = 'wanderlust';
     } else {
       agent.mood = 'curious';
     }
@@ -932,6 +937,7 @@ class Simulation {
       remember: 'wisdom',
       discover: 'curiosity',
       set_goal: 'resolve',
+      wander: 'exploration',
     };
     if (result.ok) {
       const invented =

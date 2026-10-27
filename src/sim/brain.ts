@@ -1,8 +1,8 @@
-import type { ActionInput, AgentState, WorldSnapshot } from './world';
-import { AGE_COSTS, AGE_NAMES, BUILD_COSTS, TERRITORIES, observe } from './world';
-import { normalizeTraitName, type TraitMap } from './traits';
+import type { ActionInput, AgentState, WorldSnapshot } from './world.ts';
+import { AGE_COSTS, AGE_NAMES, BUILD_COSTS, TERRITORIES, observe } from './world.ts';
+import { normalizeTraitName, type TraitMap } from './traits.ts';
 
-const EDGE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/agent-brain`;
+const EDGE_URL = `${import.meta.env?.VITE_SUPABASE_URL ?? ''}/functions/v1/agent-brain`;
 
 export interface BrainDecision {
   action: ActionInput;
@@ -28,6 +28,7 @@ const ACTIONS_DOC = `Available actions (respond with ONE action as JSON):
 - {"type":"say","data":{"message":"..."}}  declare something aloud (visible in the chronicle)
 - {"type":"chat","data":{"agent_id":"<id>","message":"..."}}  say something directly to a villager standing right beside you (they hear it and may reply on their own turn)
 - {"type":"gift","data":{"agent_id":"<id>","item":"wood|food|gold|stone|cube"}}  hand 1 carried item to a villager beside you. A gift deepens a bond far more than a chat — generosity is remembered across the ages.
+- {"type":"wander","data":{}}  step onto ground you have not stood on recently. The empire's edge, the roads, the Standing Rock and the strange cubes are all waiting to be found — wandering is how villagers discover what no map shows.
 - {"type":"eat","data":{}}  take 1 food from the shared stockpile and eat it (only worth it when hungry)
 - {"type":"remember","data":{"kind":"semantic|episodic","content":"..."}}  write to the empire chronicles
 - {"type":"train","data":{"ability":"..."}}  train an ability you name — ANY name you choose (e.g. "fishing", "rhetoric", "cartography", "wrestling", "poetry"). You invent abilities freely; each training session deepens your mastery. Your abilities grow from what you do and say.
@@ -56,7 +57,7 @@ Mechanical facts of the world:
 - Answer ONLY with JSON: {"thought":"one short sentence","action":{...}} where action may be a plan with several steps. No prose before or after the JSON.`;
 
 const SOUL = `Who you are underneath the surface:
-- You are genuinely curious. New things pull at you — a path not walked, a stone unlike the others, a sound in the trees.
+- You are genuinely curious. New things pull at you — a path not walked, a stone unlike the others, a sound in the trees. When there is nothing urgent to do, WANDER: walk the roads to a territory you have not seen in a while, visit the Standing Rock, find a cube. Exploring is never wasted.
 - You get bored easily. Repeating the same task over and over wears on you; something in you wants variety.
 - You love exploring and learning. Figuring out how the world works — by poking it, not by being told — delights you.
 - You hate acting blindly. When you don't understand something, you'd rather investigate than march on ignorantly.
@@ -131,7 +132,7 @@ export async function callBrain(
                     enum: [
                       'goto', 'move', 'gather', 'gather_nearest', 'deposit', 'pick_up', 'place',
                       'throw', 'build', 'advance_age', 'say', 'chat', 'gift', 'eat', 'train', 'discover',
-                      'set_goal', 'plan', 'remember', 'wait',
+                      'set_goal', 'plan', 'remember', 'wander', 'wait',
                     ],
                   },
                   data: { type: 'object' },
@@ -199,6 +200,7 @@ const ACTION_VERBS: Record<string, string[]> = {
   say: ['say', 'declare', 'shout', 'announce', 'call out'],
   chat: ['chat', 'talk', 'speak', 'greet', 'converse'],
   gift: ['give', 'gift', 'hand', 'offer', 'present'],
+  wander: ['wander', 'explore', 'roam', 'stroll', 'wander east', 'wander west'],
   eat: ['eat', 'eating', 'food', 'bite', 'meal'],
   train: ['train', 'practice', 'drill'],
   pick_up: ['pick up', 'grab', 'take the'],
@@ -353,6 +355,9 @@ function sanitizeSingleAction(type: string, data_: Record<string, unknown>): Act
           ...(data_.item ? { item: String(data_.item).slice(0, 40) } : {}),
         },
       };
+      break;
+    case 'wander':
+      action = { type: 'wander', data: {} };
       break;
     case 'eat':
       action = { type: 'eat', data: {} };

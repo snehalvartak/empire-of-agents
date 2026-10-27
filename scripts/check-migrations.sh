@@ -11,7 +11,9 @@
 #      filename order, each with ON_ERROR_STOP in one transaction. A failing file
 #      is named and the run stops.
 #   3. Asserts the resulting schema in SQL (columns/types, checkpoints,
-#      structures key, realtime publication membership).
+#      structures key, realtime publication membership, and the persisted
+#      villager state: agents.inventory/inbox NOT NULL DEFAULT '[]' backfilled
+#      onto a villager that existed before, sessions.last_actor_id/index nullable).
 #   4. Applies the whole set a second time and asserts it is a no-op (every file
 #      applies cleanly and the schema dump is byte-identical).
 #   5. Checks the documented legacy-row DELETE of the respawn_tick migration:
@@ -177,6 +179,9 @@ sql <<SQL
 INSERT INTO depleted_objects (id, session_id, respawn_at) VALUES
   ('legacy_animal', '$SESSION_ID', now() + interval '1 hour'),  -- animal: respawn_at set
   ('legacy_mine',   '$SESSION_ID', NULL);                      -- mine: never respawns
+-- a villager and an era that exist before the persisted-state migration (it must backfill them)
+INSERT INTO agents (id, name, model, color) VALUES ('00000000-0000-0000-0000-0000000000b1', 'legacy_villager', 'stub', '#000000');
+INSERT INTO sessions (id, seq, title) VALUES ('00000000-0000-0000-0000-0000000000a0', 9000, 'check-migrations legacy era');
 SQL
 
 # part 2: the rest, starting with the migration under test
@@ -187,6 +192,11 @@ check "legacy animal row (respawn_at set, no respawn_tick) removed by the respaw
   "SELECT count(*)=0 FROM depleted_objects WHERE id='legacy_animal'"
 check "legacy mine row (respawn_at null) survives the respawn_tick migration" \
   "SELECT count(*)=1 FROM depleted_objects WHERE id='legacy_mine' AND respawn_tick IS NULL"
+
+check "legacy villager gets inventory '[]' and inbox '[]' from the persisted-state migration" \
+  "SELECT EXISTS (SELECT 1 FROM agents WHERE name='legacy_villager' AND inventory = '[]'::jsonb AND inbox = '[]'::jsonb)"
+check "legacy era gets a null turn cursor from the persisted-state migration" \
+  "SELECT EXISTS (SELECT 1 FROM sessions WHERE id='00000000-0000-0000-0000-0000000000a0' AND last_actor_id IS NULL AND last_actor_index IS NULL)"
 
 # --- schema assertions --------------------------------------------------------------
 col() { # table column data_type
@@ -199,6 +209,10 @@ col sessions parent_session_id uuid
 col sessions fork_tick integer
 col memories session_id uuid
 col memories tick integer
+col agents inventory jsonb
+col agents inbox jsonb
+col sessions last_actor_id uuid
+col sessions last_actor_index integer
 col depleted_objects respawn_tick integer
 col depleted_objects respawn_at 'timestamp with time zone'
 col events tick integer
@@ -206,6 +220,31 @@ col checkpoints session_id uuid
 col checkpoints tick integer
 col checkpoints snapshot jsonb
 col agent_positions tick integer
+check "agents.inventory and agents.inbox are NOT NULL with default '[]'; the cursor columns are nullable with no default" \
+  "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='agents' AND column_name IN ('inventory','inbox')
+              AND is_nullable='NO' AND column_default LIKE '''[]''::jsonb%')=2
+      AND (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='sessions' AND column_name IN ('last_actor_id','last_actor_index')
+              AND is_nullable='YES' AND column_default IS NULL)=2"
+check "a villager inserted without the new columns defaults to empty hands and an empty inbox; null is refused" \
+  "WITH x AS (INSERT INTO agents (name, model, color) VALUES ('default_villager', 'stub', '#000000') RETURNING inventory, inbox)
+   SELECT count(*)=1 AND bool_and(inventory='[]'::jsonb AND inbox='[]'::jsonb) FROM x"
+if val "UPDATE agents SET inbox = NULL WHERE name='default_villager'" >/dev/null 2>&1; then
+  fail "agents.inbox refuses NULL"
+else
+  pass "agents.inbox refuses NULL"
+fi
+if val "UPDATE agents SET inventory = NULL WHERE name='default_villager'" >/dev/null 2>&1; then
+  fail "agents.inventory refuses NULL"
+else
+  pass "agents.inventory refuses NULL"
+fi
+check "carried items, pending chat and the turn cursor store and read back as the app writes them (jsonb round trip)" \
+  "WITH a AS (UPDATE agents SET inventory='[\"wood\",\"cube\"]', inbox='[{\"fromId\":\"x\",\"fromName\":\"Bramble\",\"message\":\"hi\"}]' WHERE name='default_villager' RETURNING inventory, inbox),
+        s AS (UPDATE sessions SET last_actor_id='00000000-0000-0000-0000-0000000000b1', last_actor_index=2 WHERE id='00000000-0000-0000-0000-0000000000a0' RETURNING last_actor_id, last_actor_index)
+   SELECT (SELECT inventory->>1 = 'cube' AND inbox->0->>'message' = 'hi' FROM a)
+      AND (SELECT last_actor_id = '00000000-0000-0000-0000-0000000000b1'::uuid AND last_actor_index = 2 FROM s)"
+check "the turn cursor needs no villager row (no foreign key: a dismissed villager must not block the write)" \
+  "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.sessions'::regclass AND contype='f' AND conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.sessions'::regclass AND attname='last_actor_id')])"
 check "checkpoints unique on (session_id, tick)" \
   "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.checkpoints'::regclass AND contype='u'
       AND (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(conkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid=conrelid AND a.attnum=k.attnum) = ARRAY['session_id','tick'])"

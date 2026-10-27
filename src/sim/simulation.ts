@@ -27,6 +27,7 @@ import {
 } from './memory';
 import type { EraScope, MemoryRow } from './memory';
 import { pickNextActor } from './rotation';
+import { agentStateFromRow, agentStatePatch, carriedPatch, cursorFromRow, cursorPatch } from './persisted';
 import { eventsForResult, planEndRow } from './chronicle';
 import { bondExchange, createBondWriter, recordBond } from './bonds';
 import type { Bond, BondExchange, PairRow } from './bonds';
@@ -51,6 +52,9 @@ export interface SessionRow {
   /** Set on a forked era ("Era N, continued"): the archived era it continues and the checkpoint tick it started from. */
   parent_session_id?: string | null;
   fork_tick?: number | null;
+  /** Turn cursor (R7.5) as of the last turn written; loadWorld reads it fresh, never from this copy. */
+  last_actor_id?: string | null;
+  last_actor_index?: number | null;
   /** Single-driver lease (R7.6): the window driving the tick loop and its last heartbeat. */
   driver_id?: string | null;
   driver_heartbeat_at?: string | null;
@@ -393,6 +397,7 @@ class Simulation {
           energy: Math.round(a.energy),
           traits: a.traits ?? {},
           goals: a.goals ?? [],
+          inventory: carriedPatch(a).inventory,
         })
         .select('id')
         .single();
@@ -409,7 +414,12 @@ class Simulation {
     }
     const built = world.snapshot.objects.filter((o) => !seedIds.has(o.id));
     const civ = world.snapshot.civ;
+    // pending chat names its sender, and the senders now have new ids: write it (and the cursor) once those exist
     const writes = await Promise.all([
+      ...world.snapshot.agents
+        .filter((a) => a.inbox?.length)
+        .map((a) => supabase.from('agents').update({ inbox: carriedPatch(a).inbox }).eq('id', a.id)),
+      supabase.from('sessions').update(cursorPatch(world.cursor)).eq('id', sid),
       built.length
         ? supabase.from('structures').insert(
             built.map((o) => ({ session_id: sid, id: o.id, territory: o.territory, position: o.pos, kind: o.kind, built_by: o.builtBy ?? null }))
@@ -485,7 +495,12 @@ class Simulation {
     return `${snap.agents.length} villagers · ${ageName} · ${snap.civ.wood} wood, ${snap.civ.food} food, ${snap.civ.gold} gold, ${snap.civ.stone} stone · ${snap.tick} ticks`;
   }
 
-  private async loadWorld() {
+  /**
+   * Rebuilds the world from the database. A window that is driving and already shows this roster keeps
+   * what it holds in memory for what is newer than the last write (carried items, unheard chat, the turn
+   * cursor); `fresh` forces the database's values, for a window taking over from a watching view.
+   */
+  private async loadWorld(fresh = false) {
     if (!this.session) return;
     const sid = this.session.id;
     const { data: agentRowsData, error } = await supabase
@@ -563,7 +578,13 @@ class Simulation {
     for (const r of stillDepleted) this.depleted.set(r.id as string, (r.respawn_tick as number | null) ?? null);
     const seeds = seedObjects().filter((o) => !depletedIds.has(o.id));
 
-    const heard = new Map(this.snapshot.agents.map((a) => [a.id, a.inbox] as const));
+    const keepLive = !fresh && !this.readOnly && this.snapshot.agents.length > 0;
+    const live = new Map(this.snapshot.agents.map((a) => [a.id, a] as const));
+    // inventory and unheard chat come back from the row (persisted.ts), so a reload loses neither
+    const carriedOf = (row: { id: string }) => {
+      const known = keepLive ? live.get(row.id) : undefined;
+      return known ? { inventory: known.inventory, inbox: known.inbox } : agentStateFromRow(row);
+    };
     const agents: AgentState[] = (agentRows ?? []).map((row) => ({
       id: row.id,
       name: row.name,
@@ -574,14 +595,25 @@ class Simulation {
       mood: row.mood,
       persona: row.persona,
       status: row.status,
-      inventory: [],
       traits: sanitizeTraits(row.traits),
       goals: sanitizeGoals(row.goals),
       hunger: row.hunger ?? 0,
       energy: row.energy ?? 100,
-      inbox: heard.get(row.id),
+      ...carriedOf(row),
     }));
     await this.hydrateRelationships(agents);
+
+    if (!keepLive) {
+      // the exact next actor: the cursor saved after the last turn, checked against the roster we just loaded
+      const { data: cursorRow } = await supabase
+        .from('sessions')
+        .select('last_actor_id, last_actor_index')
+        .eq('id', sid)
+        .maybeSingle();
+      const cursor = cursorFromRow(cursorRow, agents.map((a) => a.id));
+      this.lastActorId = cursor.lastActorId;
+      this.lastActorIndex = cursor.lastActorIndex;
+    }
 
     const objects = [...seeds, ...builtStructures];
     this.snapshot = {
@@ -653,6 +685,8 @@ class Simulation {
         persona: a.persona,
         mood: 'curious',
         status: 'idle',
+        inventory: [],
+        inbox: [],
       })
       .select()
       .single();
@@ -713,6 +747,8 @@ class Simulation {
           persona: v.persona,
           mood: 'curious',
           status: 'idle',
+          inventory: [],
+          inbox: [],
         }))
       )
       .select();
@@ -901,7 +937,7 @@ class Simulation {
         return;
       }
       // taking over from a watching view: reload, so the loop starts from what the last driver saved
-      if (wasWatching) await this.loadWorld();
+      if (wasWatching) await this.loadWorld(true);
       this.running = true;
       this.error = null;
       this.startHeartbeat();
@@ -1094,8 +1130,7 @@ class Simulation {
     agent.recentTiles = [...(agent.recentTiles ?? []), { ...agent.pos }].slice(-24);
 
     this.snapshot.tick++;
-    await this.updateAgentRow(agent);
-    await this.persistNeeds(agent);
+    await this.persistTurn(agent);
     await this.recordPosition(agent);
     await this.maybeCheckpoint();
     this.pushHistory();
@@ -1245,9 +1280,20 @@ class Simulation {
     thought: string,
     isFirst: boolean
   ): Promise<import('./world').ActionResult> {
+    const carriedBefore = JSON.stringify(agent.inventory);
     const result = step(this.snapshot, agent.id, action);
     agent.island = territoryAt(agent.pos) ?? agent.island;
     if (this.readOnly) return result; // lease lost mid-turn: no persistence from here (R7.6)
+
+    // what changed hands is saved with the deed, so a reload between steps (or before the turn ends) never
+    // duplicates or loses it: the actor's items, and the other villager's words or item (their state changed on
+    // someone else's turn)
+    const other = result.chat?.withId ?? result.gift?.withId;
+    const otherAgent = other ? this.snapshot.agents.find((a) => a.id === other) : undefined;
+    await this.persistCarried(
+      ...(JSON.stringify(agent.inventory) !== carriedBefore ? [agent] : []),
+      ...(otherAgent ? [otherAgent] : [])
+    );
 
     // every result is chronicled, success or failure, together with a lost chat and the thought (chronicle.ts, R3.3)
     const chatTarget = result.chat ? this.snapshot.agents.find((a) => a.id === result.chat!.withId) : undefined;
@@ -1433,23 +1479,35 @@ class Simulation {
     });
   }
 
-  private async updateAgentRow(agent: AgentState) {
-    await supabase
-      .from('agents')
-      .update({
-        position: agent.pos,
-        island: agent.island,
-        mood: agent.mood,
-        status: agent.status,
-      })
-      .eq('id', agent.id);
+  /**
+   * After a turn: the villager's row in one update (place, mood, needs, what they carry and have yet to
+   * hear) and the turn cursor in one more, sent together. Only the driver gets here (tick returns first
+   * when the lease is lost).
+   */
+  private async persistTurn(agent: AgentState) {
+    await Promise.all([
+      supabase.from('agents').update(agentStatePatch(agent)).eq('id', agent.id),
+      this.persistCursor(),
+    ]);
   }
 
-  private async persistNeeds(agent: AgentState) {
-    await supabase
-      .from('agents')
-      .update({ hunger: Math.round(agent.hunger), energy: Math.round(agent.energy) })
-      .eq('id', agent.id);
+  /** Best-effort: a missed write only means a reload hands the turn to the previous cursor's successor. */
+  private async persistCursor() {
+    if (this.readOnly || !this.session) return;
+    try {
+      await supabase
+        .from('sessions')
+        .update(cursorPatch({ lastActorId: this.lastActorId, lastActorIndex: this.lastActorIndex }))
+        .eq('id', this.session.id);
+    } catch {
+      // the next turn writes it again
+    }
+  }
+
+  /** Saves what changed hands during a step, to every villager it changed (a gift or a chat changes the OTHER one too). */
+  private async persistCarried(...agents: AgentState[]) {
+    if (this.readOnly) return;
+    await Promise.all(agents.map((a) => supabase.from('agents').update(carriedPatch(a)).eq('id', a.id)));
   }
 }
 

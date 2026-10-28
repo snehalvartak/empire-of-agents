@@ -24,6 +24,8 @@ const MANIFEST = parseManifest(ISLAND_MANIFEST_TOML);
 const STORY_TITLE = 'The Dawn of the Stubborn Hearth'; // the gateway's fixed answer to the chronicle-title request
 const GREETING = 'Meet me at the old oak at dawn';
 const WATCH_BANNER = 'Another window is driving this era — you are watching.';
+// either note of a watching window: another window drives, or (found by the watcher's refresh) the driver has gone
+const ANY_WATCH_BANNER = /Another window is driving this era|The window that was driving this era has stopped/;
 const DRIVER_GONE_BANNER = 'The window that was driving this era has stopped — press "Try to take over" to continue it.';
 const SPEED = 'Fast'; // 1.5 s per tick: the fastest speed the UI offers
 
@@ -350,7 +352,7 @@ async function scenarioRun() {
   }, { timeout: 20000, interval: 400 }).then(() => true, () => false);
   check(`UI: with Realtime refused the Chronicle panel tracks the database while the era runs: ${sample.rows} rows on screen, ${sample.db} events in the database (was 4 vs 19 at tick ${t} before the polling fallback); within 8 rows`,
     tracked, json(sample));
-  const polls = requestsOf('p1', isFeedPoll('events'));
+  const polls = requestsOf('p1', isFeedPoll('events')).filter((e) => decodeURIComponent(e.url).includes(`session_id=eq.${era}`));
   check(`the panel was kept current by the fallback poll: p1 sent ${polls.length} GET /rest/v1/events requests for rows at or after its newest row (and no websocket delivered anything: ${gw.realtimeAttempts.length} refused upgrades)`,
     polls.length >= 2 && gw.realtimeAttempts.length >= 1, json(polls.slice(0, 2)));
   check('the poll is a small read: the era\'s events only, newest first, limited to the panel size (100)',
@@ -471,15 +473,20 @@ async function scenarioSingleDriver() {
   const picked = p2.locator('button', { hasText: /\(\d+, \d+\)/ }).first();
   await picked.click(); // a selection the refresh must not undo
   const pickedClass = async () => (await picked.getAttribute('class')) ?? '';
-  const startedWatching = { tick: await uiTick(p2), pos: await posOf(p2) };
+  // the scripted villagers stand still gathering, so make the next turn a wander: somebody really moves while p2 watches
+  const hungerOf = (p) => p.locator('[title^="Hunger "]').evaluateAll((els) => els.map((e) => e.getAttribute('title')));
+  const startedWatching = { tick: await uiTick(p2), pos: await posOf(p2), hunger: await hungerOf(p2) };
+  gw.scriptNext(() => ({ thought: 'I wander to find new ground.', action: { type: 'wander', data: {} } }));
   const followedAt = Date.now();
   const followed = await waitFor('the watcher follows the era', async () => {
     const tk = await uiTick(p2);
     const pos = await posOf(p2);
-    return tk > startedWatching.tick && json(pos) !== json(startedWatching.pos) ? { tk, pos } : null;
+    const hunger = await hungerOf(p2);
+    return tk > startedWatching.tick && json(pos) !== json(startedWatching.pos) && json(hunger) !== json(startedWatching.hunger) ? { tk, pos, hunger } : null;
   }, { timeout: 12000, interval: 250 }).catch(() => null);
-  check(`UI: the watcher's tick and villager positions advance without a reload while the driver runs: tick ${watchTick} at load, ${startedWatching.tick} -> ${followed?.tk} within ${((Date.now() - followedAt) / 1000).toFixed(1)} s, ${json(startedWatching.pos)} -> ${json(followed?.pos)}`,
-    followed && Date.now() - followedAt <= 10000 && followed.tk > watchTick, json([startedWatching, followed]));
+  check(`UI: the watcher's tick, villager positions and need bars advance without a reload while the driver runs: tick ${watchTick} at load, ${startedWatching.tick} -> ${followed?.tk} within ${((Date.now() - followedAt) / 1000).toFixed(1)} s, ${json(startedWatching.pos)} -> ${json(followed?.pos)}, hunger ${json(startedWatching.hunger)} -> ${json(followed?.hunger)}`,
+    followed && Date.now() - followedAt <= 10000 && followed.tk > watchTick,
+    `${json([startedWatching, followed])}\nui now: tick ${await uiTick(p2)} ${json(await posOf(p2))}\ndb now: tick ${maxTick(era)} ${json(villagers(era).map((v) => [v.name, v.position]))}`);
   if (followed) {
     const known = q(`SELECT a.name, p.x, p.y FROM agent_positions p JOIN agents a ON a.id = p.agent_id WHERE p.session_id=${lit(era)}`);
     check('the positions the watcher shows are positions the driver really wrote (each matches an agent_positions row of that villager)',
@@ -539,7 +546,7 @@ async function scenarioSingleDriver() {
   const nClaim = gw.log.length;
   const beforeTakeover = maxTick(era);
   await btn(p2, 'Try to take over').click();
-  await p2.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
+  await p2.getByText(ANY_WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
     () => check('p2 "Try to take over" succeeds once p1 is gone: the banner disappears', true),
     () => check('p2 "Try to take over" succeeds once p1 is gone: the banner disappears', false, 'banner still visible'));
   const e2 = eraRow(era);
@@ -583,6 +590,22 @@ async function scenarioFork() {
   await haltAndSettle(p2, era, 'p2');
   const finalTick = maxTick(era);
   S.finalTick = finalTick;
+
+  // The feeds on p2 (opened as a watcher, never reloaded, Realtime refused) now equal the database: only the polling fallback
+  // can have put the rows there. Exactly the newest 100 events, newest first, each once (the ids are unique in the database).
+  await p2.getByRole('button', { name: /Chronicle/ }).first().click();
+  const newestEvents = () => q(`SELECT message FROM events WHERE session_id=${lit(era)} ORDER BY created_at DESC LIMIT 100`).map((r) => r.message);
+  const dbEventTotal = eventCount(era);
+  const feedSame = await waitFor('the Chronicle equals the database', async () => json(await feedMessages(p2)) === json(newestEvents()), { timeout: 15000, interval: 500 }).then(() => true, () => false);
+  const feedShown = await feedMessages(p2);
+  check(`UI: after the run, p2's Chronicle (never reloaded, Realtime refused) lists exactly the database's newest ${feedShown.length} of ${dbEventTotal} events, newest first, none twice`,
+    feedSame && feedShown.length === Math.min(100, dbEventTotal), `ui=${feedShown.length} db=${dbEventTotal}\nui:  ${json(feedShown.slice(0, 5))}\ndb:  ${json(newestEvents().slice(0, 5))}`);
+  if (dbEventTotal <= 100) note(`the panel's 100-row cap was not reached in this run (${dbEventTotal} events); the cap is unit-tested (mergeRows)`);
+  await p2.getByRole('button', { name: /Records/ }).first().click();
+  const newestMemory = q(`SELECT content FROM memories WHERE session_id=${lit(era)} ORDER BY created_at DESC LIMIT 1`)[0]?.content;
+  const memoryShown = await p2.getByText(newestMemory ?? '', { exact: true }).first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+  check('UI: the Records panel follows the database too: the newest memory row is on screen on p2', Boolean(newestMemory) && memoryShown, newestMemory);
+  await p2.getByRole('button', { name: /Chronicle/ }).first().click();
 
   // d2) deterministic "memories after the fork tick must stay invisible": plant one visible and one hidden diary row per villager
   const cpTick = q(`SELECT max(tick)::int AS t FROM checkpoints WHERE session_id=${lit(era)}`)[0].t;
@@ -949,7 +972,7 @@ async function scenarioBondRetry() {
   x(`UPDATE sessions SET driver_id=NULL, driver_heartbeat_at=NULL WHERE id=${lit(era)}`);
   const mark5 = gw.log.length;
   await btn(p3, 'Try to take over').click();
-  await p3.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 });
+  await p3.getByText(ANY_WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 });
   await expectWait(`DB: once p3 took the lease over, the persisted ${BIG} (strictly higher than ${dbNow}) was written`, () => q(`SELECT strength FROM relationships WHERE ${pairWhere(pair)}`)[0].strength >= BIG, { timeout: 20000, interval: 100 });
   await expectWait('p3: the dirty row is gone from its localStorage', async () => (await dirtyRows(p3)) === null, { timeout: 10000, interval: 100 });
   check(`p3's upsert for the pair carried exactly strength ${BIG}, sent after the takeover claim`, relUpserts(mark5, 'p3').some((u) => u.row.strength === BIG && u.status >= 200 && u.status < 300), json(relUpserts(mark5, 'p3')));
@@ -1046,7 +1069,7 @@ async function scenarioClockSkew() {
   x(`UPDATE sessions SET driver_id='e2e-ghost', driver_heartbeat_at=now() - interval '31 seconds' WHERE id=${lit(era)}`);
   n = gw.log.length;
   await btn(behind.page, 'Try to take over').click();
-  await behind.page.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
+  await behind.page.getByText(ANY_WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
     () => check('a lease 31 s old is STALE for the window whose clock is 5 min behind: it takes over (banner gone)', true),
     () => check('a lease 31 s old is STALE for the window whose clock is 5 min behind: it takes over (banner gone)', false, 'banner still visible'));
   const behindClaim = gw.log.slice(n).find((e) => e.page === 'p-behind' && isClaim(e));
@@ -1069,7 +1092,7 @@ async function scenarioClockSkew() {
   await haltAndSettle(behind.page, era, 'p-behind');
   n = gw.log.length;
   await btn(ahead.page, 'Try to take over').click();
-  await ahead.page.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
+  await ahead.page.getByText(ANY_WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
     () => check('after p-behind stopped, the window whose clock is 5 min ahead takes over (banner gone)', true),
     () => check('after p-behind stopped, the window whose clock is 5 min ahead takes over (banner gone)', false, 'banner still visible'));
   const aheadId = eraRow(era).driver_id;

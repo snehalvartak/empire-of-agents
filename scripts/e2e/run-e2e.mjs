@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createClient } from '@supabase/supabase-js';
-import { leaseClaimFilter, DRIVER_TTL_MS } from '../../src/sim/driver.ts';
+import { DRIVER_TTL_MS, DRIVER_TTL_SECONDS } from '../../src/sim/driver.ts';
 import { checkFingerprint, parseManifest } from '../../src/sim/manifest.ts';
 import { ISLAND_MANIFEST_TOML } from '../../src/sim/islandManifest.generated.ts';
 import { makeOutDir, startStack } from './stack.mjs';
@@ -162,7 +162,11 @@ async function haltAndSettle(p, sid, label) {
   return t;
 }
 const requestsOf = (page, filter) => gw.log.filter((e) => e.page === page && filter(e));
-const isWrite = (e) => !['GET', 'HEAD', 'OPTIONS'].includes(e.method);
+// session_lease_state is a STABLE function the app calls with POST (supabase-js rpc): a read, the way a watcher asks who drives
+const isLeaseRead = (e) => e.method === 'POST' && e.url.split('?')[0] === '/rest/v1/rpc/session_lease_state';
+const isWrite = (e) => !['GET', 'HEAD', 'OPTIONS'].includes(e.method) && !isLeaseRead(e);
+const isRpc = (name) => (e) => e.method === 'POST' && e.url.split('?')[0] === `/rest/v1/rpc/${name}`;
+const isClaim = isRpc('claim_session_lease');
 const tableOf = (e) => (/\/rest\/v1\/([a-z_]+)/.exec(e.url) ?? [])[1] ?? e.url.split('?')[0];
 
 // ---------------------------------------------------------------------------------------------- state shared by scenarios
@@ -391,8 +395,10 @@ async function scenarioSingleDriver() {
   const d1 = eraRow(era);
   S.driverA = d1.driver_id;
   check('p1 is the driver: sessions.driver_id is p1\'s id', Boolean(d1.driver_id));
-  const claimByP1 = requestsOf('p1', (e) => e.method === 'PATCH' && /sessions\?/.test(e.url) && /or=/.test(e.url) && e.status === 200).pop();
-  check('p1\'s own claim request carries driver_id = the id in the database', claimByP1 && JSON.parse(claimByP1.body).driver_id === d1.driver_id, claimByP1?.body);
+  const claimByP1 = requestsOf('p1', (e) => isClaim(e) && e.status === 200 && e.responseSnippet.trim() === 'true').pop();
+  check('p1\'s own claim is POST /rest/v1/rpc/claim_session_lease, answered true, and names the driver id the database holds',
+    claimByP1 && JSON.parse(claimByP1.body).p_driver === d1.driver_id && JSON.parse(claimByP1.body).p_session === era, claimByP1?.body);
+  check('p1 sent no timestamp of its own with the claim (the body is only session, driver and ttl)', claimByP1 && json(Object.keys(JSON.parse(claimByP1.body)).sort()) === json(['p_driver', 'p_session', 'p_ttl_seconds']), claimByP1?.body);
 
   S.ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: { 'x-e2e-page': 'p2' } });
   const t0Ticks = maxTick(era);
@@ -402,6 +408,8 @@ async function scenarioSingleDriver() {
   await waitVillagers(p2);
   const banner = p2.getByText(WATCH_BANNER);
   check('p2 shows the watch-mode banner "Another window is driving this era — you are watching."', await banner.isVisible());
+  const p2State = requestsOf('p2', isLeaseRead)[0];
+  check('p2 learned that from the database: POST /rest/v1/rpc/session_lease_state answered "other"', p2State && p2State.status === 200 && p2State.responseSnippet.trim() === '"other"', json(p2State));
   check('p2 offers "Try to take over" instead of Begin', (await btn(p2, 'Try to take over').isVisible()) && (await btn(p2, 'Begin').count()) === 0);
   const speedDisabled = await Promise.all(['Slow', 'Normal', 'Fast'].map((s) => btn(p2, s).isDisabled()));
   const dismissButtons = p2.getByRole('button', { name: 'Dismiss' });
@@ -434,10 +442,10 @@ async function scenarioSingleDriver() {
   // p2 tries to take over while p1 is alive: the real conditional UPDATE comes back with zero rows
   const nPatch = gw.log.length;
   await btn(p2, 'Try to take over').click();
-  const denied = await waitFor('the denied claim request', () => gw.log.slice(nPatch).find((e) => e.page === 'p2' && e.method === 'PATCH' && /or=/.test(e.url)), { timeout: 10000 });
+  const denied = await waitFor('the denied claim request', () => gw.log.slice(nPatch).find((e) => e.page === 'p2' && isClaim(e)), { timeout: 10000 });
   S.deniedClaim = denied;
-  check('p2 "Try to take over" while p1 drives: PostgREST answers 200 with zero rows, p2 stays a watcher and the lease stays p1\'s',
-    denied.status === 200 && denied.responseSnippet.trim() === '[]' && (await banner.isVisible()) && eraRow(era).driver_id === S.driverA, json(denied));
+  check('p2 "Try to take over" while p1 drives: claim_session_lease answers HTTP 200 with false, p2 stays a watcher and the lease stays p1\'s',
+    denied.status === 200 && denied.responseSnippet.trim() === 'false' && (await banner.isVisible()) && eraRow(era).driver_id === S.driverA, json(denied));
 
   // close p1: the lease is released by pagehide (not by waiting out the 30 s TTL)
   const tBeforeClose = maxTick(era);
@@ -445,6 +453,9 @@ async function scenarioSingleDriver() {
   const closedAt = Date.now();
   const freed = await waitFor('p1 closed -> lease free', () => eraRow(era).driver_id === null, { timeout: 8000 }).then(() => true, () => false);
   check(`closing p1 released the lease within ${((Date.now() - closedAt) / 1000).toFixed(1)} s (pagehide/beforeunload), without waiting for the ${DRIVER_TTL_MS / 1000} s TTL`, freed, json(eraRow(era)));
+  const unloadRelease = requestsOf('p1', isRpc('release_session_lease')).pop();
+  check('the unload release was the keepalive POST /rest/v1/rpc/release_session_lease naming p1\'s id, answered true',
+    unloadRelease && unloadRelease.status === 200 && unloadRelease.responseSnippet.trim() === 'true' && JSON.parse(unloadRelease.body).p_driver === S.driverA && JSON.parse(unloadRelease.body).p_session === era, json(unloadRelease));
   if (!freed) {
     note('p1\'s close did not release the lease; waiting out the TTL instead');
     await waitFor('lease stale', () => Date.now() - Date.parse(eraRow(era).driver_heartbeat_at) > DRIVER_TTL_MS + 1000, { timeout: 45000, interval: 500 });
@@ -464,10 +475,10 @@ async function scenarioSingleDriver() {
     () => check('p2 "Try to take over" succeeds once p1 is gone: the banner disappears', false, 'banner still visible'));
   const e2 = eraRow(era);
   S.driverB = e2.driver_id;
-  const claimReq = gw.log.slice(nClaim).find((e) => e.page === 'p2' && e.method === 'PATCH' && /or=/.test(e.url));
+  const claimReq = gw.log.slice(nClaim).find((e) => e.page === 'p2' && isClaim(e));
   S.takeoverClaim = claimReq;
-  check('DB: sessions.driver_id is now p2\'s id (the one in its claim request body), not p1\'s',
-    e2.driver_id && e2.driver_id !== S.driverA && claimReq && JSON.parse(claimReq.body).driver_id === e2.driver_id && claimReq.status === 200 && claimReq.responseSnippet.length > 10, json([e2.driver_id, claimReq]));
+  check('DB: sessions.driver_id is now p2\'s id (the one in its claim request body), not p1\'s; the claim answered true',
+    e2.driver_id && e2.driver_id !== S.driverA && claimReq && JSON.parse(claimReq.body).p_driver === e2.driver_id && claimReq.status === 200 && claimReq.responseSnippet.trim() === 'true', json([e2.driver_id, claimReq]));
   check('p2 is now driving: the button reads Halt', await btn(p2, 'Halt').isVisible());
   await btn(p2, SPEED).click();
   await waitFor('p2 writes a tick', () => maxTick(era) > beforeTakeover, { timeout: 30000 });

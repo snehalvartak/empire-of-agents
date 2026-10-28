@@ -163,7 +163,7 @@ export function VoxelWorld({
     // villagers
     const rigs = new Map<string, VillagerRig>();
     const bubbles = new Map<string, { sprite: THREE.Sprite; until: number }>();
-    let thinkingMarker: Map<string, THREE.Sprite> = new Map();
+    const thinkingMarker: Map<string, THREE.Sprite> = new Map();
     function showBubble(id: string, text: string, color: string, kind: 'speech' | 'thought') {
       const rig = rigs.get(id);
       if (!rig) return;

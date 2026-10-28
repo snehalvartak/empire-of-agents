@@ -5,11 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "manifest": "node scripts/build-manifest.mjs",
+    "prebuild": "npm run manifest",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "reset-world": "node scripts/reset-world.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "harness": "node scripts/agent-loop-reliability.mjs",
+    "harness:smoke": "node scripts/harness-smoke.mjs",
+    "check:migrations": "bash scripts/check-migrations.sh",
+    "e2e": "node scripts/e2e/run-e2e.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "pretest": "npm run manifest",
+    "test": "vitest run"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
@@ -17,10 +25,12 @@
     "lucide-react": "^0.446.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "smol-toml": "1.9.1",
     "three": "^0.186.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.9.1",
+    "@types/node": "24.3.1",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^5.1.1",
@@ -33,6 +43,7 @@
     "tailwindcss": "^3.4.1",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.3.0",
-    "vite": "^7.3.7"
+    "vite": "^7.3.7",
+    "vitest": "5.0.5"
   }
 }

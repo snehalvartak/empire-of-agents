@@ -53,6 +53,6 @@ export function grantXp(traits: TraitMap, trait: string, amount: number): TraitG
 
 export function normalizeTraitName(raw: string): string | null {
   const name = raw.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 28);
-  if (name.length < 2 || !/^[a-z][a-z0-9 '\-]*$/.test(name)) return null;
+  if (name.length < 2 || !/^[a-z][a-z0-9 '-]*$/.test(name)) return null;
   return name;
 }

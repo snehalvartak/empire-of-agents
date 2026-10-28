@@ -1,4 +1,10 @@
-export type TerritoryId = 'forest' | 'valley' | 'hills';
+import { ACTION_DEFS } from './actions.ts';
+import { ISLAND_MANIFEST_TOML } from './islandManifest.generated.ts';
+import { ENGINE_RULES_VERSION, fingerprint, parseManifest } from './manifest.ts';
+import type { ThrownCubeBehavior, WorldManifest } from './manifest.ts';
+
+/** Territory ids come from the world manifest (the island has 'forest', 'valley' and 'hills'). */
+export type TerritoryId = string;
 
 export interface GridPos {
   x: number;
@@ -35,7 +41,25 @@ export interface WorldObject {
   builtBy?: string;
 }
 
-export const GRID_SIZE = 24;
+/**
+ * Parses and validates a world manifest (SPEC section 6). Throws a ManifestError naming every
+ * problem when the text is not a valid world, so a bad manifest stops the app at startup rather
+ * than loading part of an island.
+ */
+export function loadIsland(text: string = ISLAND_MANIFEST_TOML): WorldManifest {
+  return parseManifest(text);
+}
+
+/** The island this build ships, loaded once. The sole source of territories, roads, seeds and the starting cast. */
+const ISLAND = loadIsland();
+
+/** Fingerprint of the island plus the engine rules version (R6.5); recorded on every checkpoint. */
+export const islandFingerprint = fingerprint(ISLAND, ENGINE_RULES_VERSION);
+
+export const GRID_SIZE = ISLAND.world.gridSize;
+
+/** Most villagers the world holds, from the manifest's max_villagers. */
+export const MAX_VILLAGERS = ISLAND.world.maxVillagers;
 
 export interface TerritoryDef {
   id: TerritoryId;
@@ -49,35 +73,20 @@ export interface TerritoryDef {
 export const ANIMAL_KINDS = ['deer', 'boar', 'sheep'] as const;
 export type AnimalKind = (typeof ANIMAL_KINDS)[number];
 
-/** How long a gathered animal takes to return to the wild. */
-export const ANIMAL_RESPAWN_MS = 10 * 60 * 1000;
+/**
+ * How long a gathered animal takes to return to the wild, in world ticks (R5.1: never wall-clock).
+ * 170 ticks is roughly the old 10 minutes at the default 3.5s per tick.
+ */
+export const ANIMAL_RESPAWN_TICKS = 170;
 
-export const TERRITORIES: TerritoryDef[] = [
-  {
-    id: 'forest',
-    name: 'Greenwood Forest',
-    color: '#22c55e',
-    offset: { x: 0, y: 0 },
-    size: 14,
-    description: 'Dense woodland. Trees stand thick here, and berry bushes grow in the shade.',
-  },
-  {
-    id: 'valley',
-    name: 'Golden Valley',
-    color: '#eab308',
-    offset: { x: 17, y: 0 },
-    size: 7,
-    description: 'Open plains of tall grass. Gold veins lie exposed in the earth.',
-  },
-  {
-    id: 'hills',
-    name: 'Stone Hills',
-    color: '#94a3b8',
-    offset: { x: 8, y: 17 },
-    size: 6,
-    description: 'Rocky highlands. Stone quarries are cut into the slopes.',
-  },
-];
+export const TERRITORIES: TerritoryDef[] = ISLAND.territories.map((t) => ({
+  id: t.id,
+  name: t.name,
+  color: t.color,
+  offset: { x: t.offset.x, y: t.offset.y },
+  size: t.size,
+  description: t.description,
+}));
 
 export function territoryDef(id: TerritoryId): TerritoryDef {
   return TERRITORIES.find((t) => t.id === id) ?? TERRITORIES[0];
@@ -101,48 +110,11 @@ export interface CivState {
   age: number; // 1..4
 }
 
-export const ROADS: Array<{ a: TerritoryId; b: TerritoryId; cells: GridPos[] }> = [
-  {
-    a: 'forest',
-    b: 'valley',
-    cells: [
-      { x: 14, y: 6 },
-      { x: 15, y: 6 },
-      { x: 16, y: 6 },
-      { x: 17, y: 6 },
-    ],
-  },
-  {
-    a: 'valley',
-    b: 'hills',
-    cells: [
-      { x: 16, y: 7 },
-      { x: 16, y: 8 },
-      { x: 16, y: 9 },
-      { x: 16, y: 10 },
-      { x: 16, y: 11 },
-      { x: 16, y: 12 },
-      { x: 16, y: 13 },
-      { x: 16, y: 14 },
-      { x: 16, y: 15 },
-      { x: 16, y: 16 },
-      { x: 15, y: 16 },
-      { x: 14, y: 16 },
-      { x: 13, y: 16 },
-    ],
-  },
-  {
-    a: 'hills',
-    b: 'forest',
-    cells: [
-      { x: 11, y: 14 },
-      { x: 10, y: 14 },
-      { x: 10, y: 15 },
-      { x: 10, y: 16 },
-      { x: 10, y: 17 },
-    ],
-  },
-];
+export const ROADS: Array<{ a: TerritoryId; b: TerritoryId; cells: GridPos[] }> = ISLAND.roads.map((r) => ({
+  a: r.from,
+  b: r.to,
+  cells: r.cells.map((c) => ({ x: c.x, y: c.y })),
+}));
 
 function inTerritory(p: GridPos, def: TerritoryDef): boolean {
   return (
@@ -184,13 +156,40 @@ export interface AgentState {
   relationships?: Array<{ withId: string; withName: string; strength: number; lastMessage: string | null }>;
   /** In-memory only: last tiles this villager stood on, newest last. Drives wander. */
   recentTiles?: GridPos[];
+  /**
+   * In-memory only (R7.4): words spoken to this villager since its last turn, oldest first,
+   * at most INBOX_LIMIT. Always replaced, never mutated, so history snapshots stay frozen.
+   */
+  inbox?: Array<{ fromId: string; fromName: string; message: string }>;
 }
+
+/** Most pending chat messages a villager keeps; the oldest is dropped beyond this (R7.4). */
+export const INBOX_LIMIT = 3;
 
 export interface WorldSnapshot {
   tick: number;
   agents: AgentState[];
   objects: WorldObject[];
   civ: CivState;
+  /** Per-era counter for ids of built structures and cubes (R5.1: never the wall clock). */
+  nextId: number;
+}
+
+/** Safe starting value for `nextId` given existing objects: one past the highest built_/cube_ id. */
+export function nextIdFor(objects: WorldObject[]): number {
+  let max = 0;
+  for (const o of objects) {
+    const m = /^(?:built|cube)_(\d+)/.exec(o.id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max + 1;
+}
+
+/** Takes the next id for a built structure or cube from the snapshot's counter. */
+function allocId(snapshot: WorldSnapshot, prefix: 'built' | 'cube'): string {
+  const n = Math.max(1, snapshot.nextId || 1);
+  snapshot.nextId = n + 1;
+  return `${prefix}_${n}`;
 }
 
 export type ActionInput =
@@ -216,6 +215,36 @@ export type ActionInput =
   | { type: 'remember'; data: { kind: 'semantic' | 'episodic'; content: string } }
   | { type: 'wait'; data: Record<string, never> };
 
+/** The single steps a decision executes: a plan's steps in order, otherwise the action itself. */
+export function planSteps(action: ActionInput): ActionInput[] {
+  return action.type === 'plan' ? action.data.steps : [action];
+}
+
+/**
+ * Runs steps strictly in order, awaiting each; a failed step ends the run there (R3.2, R8.4).
+ * `endedAt` is the index of the failing step, or null when every step succeeded.
+ */
+export async function runSteps<R extends { ok: boolean }>(
+  steps: ActionInput[],
+  exec: (step: ActionInput, index: number) => Promise<R>
+): Promise<{ results: R[]; endedAt: number | null }> {
+  const results: R[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const result = await exec(steps[i], i);
+    results.push(result);
+    if (!result.ok) return { results, endedAt: i };
+  }
+  return { results, endedAt: null };
+}
+
+/** Marks villagers' pending chat as heard: the inbox is shown exactly once (R7.4). */
+export function clearInbox(...agents: Array<AgentState | undefined>): void {
+  for (const a of agents) if (a) a.inbox = undefined;
+}
+
+/** Every action type, derived from the one definition table (ACTION_DEFS). */
+export const ACTION_TYPES = Object.keys(ACTION_DEFS) as ActionInput['type'][];
+
 export const BUILD_COSTS: Record<string, { wood: number; stone: number; gold: number }> = {
   house: { wood: 3, stone: 0, gold: 0 },
   mill: { wood: 4, stone: 0, gold: 0 },
@@ -224,71 +253,27 @@ export const BUILD_COSTS: Record<string, { wood: number; stone: number; gold: nu
   wonder: { wood: 6, stone: 8, gold: 6 },
 };
 
-/** Seeded resource nodes per territory */
+/** Seeded world objects, in manifest order with ids res_0, res_1, ... (depleted_objects rows reference these ids). */
 export function seedObjects(): WorldObject[] {
-  const objs: WorldObject[] = [];
-  let n = 0;
-  const add = (territory: TerritoryId, x: number, y: number, kind: WorldObject['kind']) => {
-    objs.push({ id: `res_${n++}`, territory, pos: { x, y }, kind });
-  };
-
-  // Greenwood Forest: clustered woodland, berry thickets, undergrowth
-  const trees: Array<[number, number]> = [
-    [2, 2], [3, 2], [2, 3], [3, 3], [4, 3], [3, 4],
-    [9, 3], [10, 3], [11, 4], [10, 4], [12, 5],
-    [4, 9], [5, 9], [5, 10], [6, 10], [5, 11], [6, 11], [4, 12],
-    [1, 7], [2, 8], [1, 9], [7, 5], [8, 5],
-    [11, 8], [12, 6], [12, 8], [8, 12], [9, 12], [9, 2], [11, 9],
-    [7, 13], [12, 12], [1, 12], [13, 3], [13, 9],
-  ];
-  trees.forEach(([x, y]) => add('forest', x, y, 'tree'));
-  const bushes: Array<[number, number]> = [
-    [2, 12], [12, 2], [6, 7], [9, 7], [3, 6], [11, 10], [1, 4], [7, 11],
-  ];
-  bushes.forEach(([x, y]) => add('forest', x, y, 'berry_bush'));
-  const shrubs: Array<[number, number]> = [
-    [4, 5], [8, 8], [11, 11], [2, 6], [9, 9], [6, 2], [13, 6], [4, 8], [10, 6], [7, 8],
-  ];
-  shrubs.forEach(([x, y]) => add('forest', x, y, 'shrub'));
-  const flowers: Array<[number, number]> = [
-    [5, 4], [8, 10], [3, 10], [11, 5], [6, 12], [12, 10], [2, 10], [9, 4],
-  ];
-  flowers.forEach(([x, y]) => add('forest', x, y, 'flower'));
-  add('forest', 7, 7, 'town_center');
-
-  // Golden Valley (offset 17,0, 7x7): gold veins, lone trees, meadow life
-  add('valley', 17 + 2, 2, 'gold_mine'); add('valley', 17 + 5, 3, 'gold_mine');
-  add('valley', 17 + 3, 5, 'gold_mine'); add('valley', 17 + 1, 4, 'gold_mine');
-  add('valley', 17 + 4, 1, 'tree'); add('valley', 17 + 1, 6, 'tree');
-  add('valley', 17 + 5, 5, 'tree');
-  add('valley', 17 + 2, 4, 'shrub'); add('valley', 17 + 4, 3, 'shrub');
-  add('valley', 17 + 3, 1, 'flower'); add('valley', 17 + 6, 2, 'flower');
-  add('valley', 17 + 5, 6, 'flower');
-  add('valley', 17 + 2, 0, 'sheep'); add('valley', 17 + 3, 0, 'sheep');
-  add('valley', 17 + 6, 4, 'sheep');
-  add('valley', 17 + 0, 2, 'deer');
-
-  // Stone Hills (offset 8,17): quarries, boulders, outcrops
-  add('hills', 8 + 1, 17 + 1, 'stone_mine'); add('hills', 8 + 4, 17 + 3, 'stone_mine');
-  add('hills', 8 + 1, 17 + 4, 'stone_mine'); add('hills', 8 + 5, 17 + 5, 'stone_mine');
-  add('hills', 8 + 3, 17 + 1, 'tree'); add('hills', 8 + 0, 17 + 2, 'tree');
-  add('hills', 8 + 5, 17 + 1, 'boulder'); add('hills', 8 + 2, 17 + 5, 'boulder');
-  add('hills', 8 + 3, 17 + 3, 'outcrop'); add('hills', 8 + 5, 17 + 4, 'outcrop');
-  add('hills', 8 + 0, 17 + 5, 'shrub');
-  add('hills', 8 + 1, 17 + 0, 'boar'); add('hills', 8 + 2, 17 + 0, 'boar');
-  add('hills', 8 + 5, 17 + 0, 'deer');
-
-  // woodland creatures in the deep forest
-  add('forest', 12, 11, 'deer'); add('forest', 1, 6, 'deer'); add('forest', 13, 12, 'boar');
-
-  // the Standing Rock — it does not gather, mine or burn. Villagers must learn what it does.
-  add('hills', 10, 19, 'rock');
-
-  // strange cubes scattered near the Town Center — free to pick up, place and throw
-  [[6, 8], [9, 8], [8, 9], [5, 6], [10, 10]].forEach(([x, y]) => add('forest', x, y, 'cube'));
-
-  return objs;
+  return ISLAND.seeds.map((o) => ({ id: o.id, territory: o.territory, pos: { x: o.pos.x, y: o.pos.y }, kind: o.kind }));
 }
+
+/** What a cube thrown at each mystery machine does, by the machine's object id (R6.2). */
+const THROWN_CUBE_BEHAVIOR = new Map<string, ThrownCubeBehavior>();
+for (const seed of ISLAND.seeds) {
+  const mystery = ISLAND.mysteries.find((m) => m.id === seed.mystery);
+  if (mystery) THROWN_CUBE_BEHAVIOR.set(seed.id, mystery.onThrownCube);
+}
+
+/** The villagers the world starts with (manifest [[starting_villagers]]). */
+export const STARTING_VILLAGERS: Array<{ name: string; persona: string; territory: TerritoryId; pos: GridPos; color: string }> =
+  ISLAND.startingVillagers.map((v) => ({
+    name: v.name,
+    persona: v.persona,
+    territory: v.territory,
+    pos: { x: v.pos.x, y: v.pos.y },
+    color: v.color ?? '#94a3b8',
+  }));
 
 const MAX_OBJECTS = 240;
 
@@ -297,13 +282,13 @@ export interface ActionResult {
   message: string;
   events: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
   memory?: { kind: 'semantic' | 'episodic' | 'discovery'; content: string };
-  depleted?: { id: string; respawnAt: number | null };
+  depleted?: { id: string; respawnTick: number | null };
   newGoal?: string;
   civDelta?: Partial<CivState>;
   civAge?: number;
   built?: { id: string; structure: WorldObject['kind']; pos: GridPos; by: string };
   spawned?: Array<{ id: string; pos: GridPos; by: string }>;
-  chat?: { withId: string; withName: string; message: string };
+  chat?: { withId: string; withName: string; message: string; dropped?: { fromName: string; message: string } };
   gift?: { withId: string; withName: string; item: string };
 }
 
@@ -331,6 +316,61 @@ function canStand(p: GridPos): boolean {
   return territoryAt(p) !== null || isRoad(p);
 }
 
+/** Resolves the id a villager was shown: the full id, the 8-character prefix the observation prints, or the villager's name. */
+export function findVillager(snapshot: WorldSnapshot, ref: string): AgentState | undefined {
+  const wanted = String(ref ?? '').trim().toLowerCase();
+  if (!wanted) return undefined;
+  const exact = snapshot.agents.find((a) => a.id.toLowerCase() === wanted);
+  if (exact) return exact;
+  const byPrefix = wanted.length >= 4 ? snapshot.agents.filter((a) => a.id.toLowerCase().startsWith(wanted)) : [];
+  if (byPrefix.length === 1) return byPrefix[0];
+  const byName = snapshot.agents.filter((a) => a.name.toLowerCase() === wanted);
+  return byName.length === 1 ? byName[0] : undefined;
+}
+
+/** Breadth-first search over walkable land (territories and roads); other villagers block, objects do not. */
+function hasLandPath(snapshot: WorldSnapshot, agent: AgentState, target: GridPos): boolean {
+  const key = (p: GridPos) => p.y * GRID_SIZE + p.x;
+  const blocked = (p: GridPos) =>
+    !canStand(p) || snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === p.x && a.pos.y === p.y);
+  if (blocked(target)) return false;
+  const seen = new Set<number>([key(agent.pos)]);
+  const queue: GridPos[] = [agent.pos];
+  for (let i = 0; i < queue.length; i++) {
+    const cur = queue[i];
+    if (cur.x === target.x && cur.y === target.y) return true;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const next = { x: cur.x + dx, y: cur.y + dy };
+      if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE) continue;
+      if (seen.has(key(next)) || blocked(next)) continue;
+      seen.add(key(next));
+      queue.push(next);
+    }
+  }
+  return false;
+}
+
+/**
+ * A free tile for a villager joining the running world (SPEC section 7, "Joining"): inside `territory`,
+ * on land, and not under another villager (one villager per tile). Tiles without an object are preferred
+ * so the newcomer does not appear on top of a tree. Null when every tile of the territory is taken.
+ */
+export function findSpawnTile(snapshot: WorldSnapshot, territory: TerritoryId, random: () => number = Math.random): GridPos | null {
+  const def = TERRITORIES.find((t) => t.id === territory);
+  if (!def) return null;
+  const free: GridPos[] = [];
+  for (let y = def.offset.y; y < def.offset.y + def.size; y++) {
+    for (let x = def.offset.x; x < def.offset.x + def.size; x++) {
+      const p = { x, y };
+      if (x >= GRID_SIZE || y >= GRID_SIZE || !canStand(p)) continue;
+      if (!snapshot.agents.some((a) => a.pos.x === x && a.pos.y === y)) free.push(p);
+    }
+  }
+  const clear = free.filter((p) => !tileOccupied(snapshot, p));
+  const pool = clear.length ? clear : free;
+  return pool.length ? pool[Math.floor(random() * pool.length)] : null;
+}
+
 function tileOccupied(snapshot: WorldSnapshot, p: GridPos): boolean {
   return snapshot.objects.some((o) => o.pos.x === p.x && o.pos.y === p.y);
 }
@@ -346,7 +386,7 @@ export function step(
   action: ActionInput
 ): ActionResult {
   const agent = snapshot.agents.find((a) => a.id === agentId);
-  if (!agent) return { ok: false, message: 'Unknown villager', events: [] };
+  if (!agent) return { ok: false, message: 'Unknown villager — no such villager stands in the empire. Try again on your next turn.', events: [] };
 
   const events: ActionResult['events'] = [];
   const dirName = (dx: number, dy: number) =>
@@ -356,7 +396,7 @@ export function step(
     case 'move': {
       const { dx, dy } = action.data;
       if (Math.abs(dx) + Math.abs(dy) !== 1) {
-        return { ok: false, message: 'Move exactly 1 step: dx/dy of -1, 0 or 1', events };
+        return { ok: false, message: 'Move exactly 1 step in a single direction (dx or dy of -1 or 1, the other 0). To travel farther, use goto with a tile instead.', events };
       }
       const next = { x: agent.pos.x + dx, y: agent.pos.y + dy };
       if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE) {
@@ -369,7 +409,7 @@ export function step(
         (a) => a.id !== agent.id && a.pos.x === next.x && a.pos.y === next.y
       );
       if (other) {
-        return { ok: false, message: `${other.name} is standing there.`, events };
+        return { ok: false, message: `${other.name} is standing there. Step around them, choose another direction, or goto a tile beyond them.`, events };
       }
       const prev = territoryAt(agent.pos);
       agent.pos = next;
@@ -390,30 +430,12 @@ export function step(
         return { ok: false, message: 'Beyond the known world lies the void. Stay on the map.', events };
       }
       if (!territoryAt(target) && !isRoad(target)) {
-        return { ok: false, message: 'That point lies in open water.', events };
+        return { ok: false, message: 'That point lies in open water. Choose a point on land, or follow the roads between the territories.', events };
       }
-      let steps = 0;
-      let cur = { ...agent.pos };
-      while ((cur.x !== x || cur.y !== y) && steps < GRID_SIZE * 3) {
-        const dx = Math.sign(x - cur.x);
-        const dy = Math.sign(y - cur.y);
-        const candidates: GridPos[] = [];
-        if (dx !== 0) candidates.push({ x: cur.x + dx, y: cur.y });
-        if (dy !== 0) candidates.push({ x: cur.x, y: cur.y + dy });
-        let moved = false;
-        for (const c of candidates) {
-          if (
-            (territoryAt(c) || isRoad(c)) &&
-            !snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === c.x && a.pos.y === c.y)
-          ) {
-            cur = c;
-            moved = true;
-            break;
-          }
-        }
-        if (!moved) return { ok: false, message: 'No clear path to that point.', events };
-        steps++;
+      if (!hasLandPath(snapshot, agent, target)) {
+        return { ok: false, message: 'No clear path to that point — open water or another villager is in the way. Try a nearer point, or step aside and go around.', events };
       }
+      const cur = target;
       const now = territoryAt(cur);
       const prev = territoryAt(agent.pos);
       agent.pos = cur;
@@ -444,14 +466,14 @@ export function step(
         obj = candidates[0].o;
       } else {
         obj = snapshot.objects.find((o) => o.id === action.data.object_id);
-        if (!obj) return { ok: false, message: 'No such resource.', events };
+        if (!obj) return { ok: false, message: 'No resource with that id exists here (it may be depleted already). Pick an id from "You see nearby", or gather_nearest once a resource is beside you.', events };
       }
       const reach = Math.max(Math.abs(obj.pos.x - agent.pos.x), Math.abs(obj.pos.y - agent.pos.y));
       if (reach > 1) {
         return { ok: false, message: `The ${obj.kind.replace('_', ' ')} is beyond arm's reach. March onto or right beside it first (goto).`, events };
       }
       const res = nodeResource(obj.kind);
-      if (!res) return { ok: false, message: `A ${obj.kind.replace('_', ' ')} is not a resource to gather.`, events };
+      if (!res) return { ok: false, message: `A ${obj.kind.replace('_', ' ')} is not a resource to gather. Choose a tree, berry bush, mine or animal instead.`, events };
       if (agent.inventory.length >= 2) {
         return { ok: false, message: 'You are carrying enough (max 2). Deposit at the Town Center first.', events };
       }
@@ -460,10 +482,10 @@ export function step(
       let depleted: ActionResult['depleted'];
       if (obj.kind === 'gold_mine' || obj.kind === 'stone_mine') {
         snapshot.objects = snapshot.objects.filter((o) => o.id !== obj.id);
-        depleted = { id: obj.id, respawnAt: null };
+        depleted = { id: obj.id, respawnTick: null };
       } else if ((ANIMAL_KINDS as readonly string[]).includes(obj.kind)) {
         snapshot.objects = snapshot.objects.filter((o) => o.id !== obj.id);
-        depleted = { id: obj.id, respawnAt: Date.now() + ANIMAL_RESPAWN_MS };
+        depleted = { id: obj.id, respawnTick: snapshot.tick + ANIMAL_RESPAWN_TICKS };
       }
       agent.inventory.push(res);
       return {
@@ -478,10 +500,10 @@ export function step(
       const carriedCubes = agent.inventory.filter((i) => i === 'cube');
       const resources = agent.inventory.filter((i) => i !== 'cube');
       if (resources.length === 0) {
-        return { ok: false, message: carriedCubes.length ? 'You carry only a strange cube — the Town Center wants no part of it. Place or throw it instead.' : 'You carry nothing to deposit.', events };
+        return { ok: false, message: carriedCubes.length ? 'You carry only a strange cube — the Town Center wants no part of it. Place or throw it instead.' : 'You carry nothing to deposit. Gather something first.', events };
       }
       const tc = snapshot.objects.find((o) => o.kind === 'town_center');
-      if (!tc) return { ok: false, message: 'There is no Town Center on the map.', events };
+      if (!tc) return { ok: false, message: 'There is no Town Center on the map, so there is nowhere to deposit. Try something else meanwhile, such as wander.', events };
       if (Math.abs(tc.pos.x - agent.pos.x) + Math.abs(tc.pos.y - agent.pos.y) > 1) {
         return {
           ok: false,
@@ -512,7 +534,7 @@ export function step(
         return { ok: false, message: 'Unknown structure. Choose: house, mill, barracks, watch_tower, wonder.', events };
       }
       if (snapshot.objects.length >= MAX_OBJECTS) {
-        return { ok: false, message: 'The known world is getting crowded.', events };
+        return { ok: false, message: 'The known world is too crowded to hold another structure. Try gathering or exploring (wander) instead.', events };
       }
       const cost = BUILD_COSTS[structure];
       const civ = snapshot.civ;
@@ -528,12 +550,12 @@ export function step(
         };
       }
       if (structure === 'wonder' && civ.age < 4) {
-        return { ok: false, message: 'A Wonder may only be raised in the Imperial Age.', events };
+        return { ok: false, message: "A Wonder may only be raised in the Imperial Age. Advance the empire's age first.", events };
       }
       civ.wood -= cost.wood;
       civ.stone -= cost.stone;
       civ.gold -= cost.gold;
-      const builtId = `built_${Date.now()}`;
+      const builtId = allocId(snapshot, 'built');
       snapshot.objects.push({
         id: builtId,
         territory: agent.island,
@@ -553,13 +575,13 @@ export function step(
     case 'advance_age': {
       const civ = snapshot.civ;
       if (civ.age >= 4) {
-        return { ok: false, message: 'The empire already stands in the Imperial Age. Glory is now built, not researched.', events };
+        return { ok: false, message: 'The empire already stands in the Imperial Age. Glory is now built, not researched. Gather for a wonder and build it instead.', events };
       }
       const cost = AGE_COSTS[civ.age]; // age 1 -> 2 uses AGE_COSTS[1]
       if (civ.wood < cost.wood || civ.food < cost.food || civ.gold < cost.gold) {
         return {
           ok: false,
-          message: `Advancing to ${AGE_NAMES[civ.age]} requires ${cost.wood} wood, ${cost.food} food, ${cost.gold} gold in the stockpile. Gather more.`,
+          message: `Advancing to ${AGE_NAMES[civ.age]} requires ${cost.wood} wood, ${cost.food} food, ${cost.gold} gold in the stockpile. Gather more and deposit it at the Town Center first.`,
           events,
         };
       }
@@ -579,9 +601,9 @@ export function step(
 
     case 'pick_up': {
       const obj = snapshot.objects.find((o) => o.id === action.data.object_id);
-      if (!obj) return { ok: false, message: 'No such object here.', events };
+      if (!obj) return { ok: false, message: 'No object with that id is here (a cube may have been moved or picked up). Pick an id from "You see nearby", and march beside it first (goto).', events };
       if (obj.kind !== 'cube') {
-        return { ok: false, message: `The ${obj.kind.replace('_', ' ')} cannot be picked up. Only the strange cubes can.`, events };
+        return { ok: false, message: `The ${obj.kind.replace('_', ' ')} cannot be picked up. Only the strange cubes can — gather resources instead, or goto a cube first.`, events };
       }
       const reach = Math.max(Math.abs(obj.pos.x - agent.pos.x), Math.abs(obj.pos.y - agent.pos.y));
       if (reach > 1) return { ok: false, message: `The cube is at (${obj.pos.x}, ${obj.pos.y}) — march onto or beside it first.`, events };
@@ -598,16 +620,16 @@ export function step(
     }
 
     case 'place': {
-      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to place.', events };
+      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to place. Goto a strange cube and pick_up it first.', events };
       const t = { x: agent.pos.x + clampInt(action.data.dx, -1, 1), y: agent.pos.y + clampInt(action.data.dy, -1, 1) };
       if (t.x < 0 || t.y < 0 || t.x >= GRID_SIZE || t.y >= GRID_SIZE || !canStand(t)) {
-        return { ok: false, message: 'You cannot set the cube down there — open water.', events };
+        return { ok: false, message: 'You cannot set the cube down there — open water. Choose another direction (dx/dy -1..1) that leads onto land.', events };
       }
       if (tileOccupied(snapshot, t)) {
         return { ok: false, message: 'Something already stands on that tile. Choose an empty one.', events };
       }
       agent.inventory = agent.inventory.filter((i) => i !== 'cube');
-      const id = `cube_${Date.now()}`;
+      const id = allocId(snapshot, 'cube');
       snapshot.objects.push({ id, territory: territoryAt(t) ?? agent.island, pos: t, kind: 'cube', builtBy: agent.name });
       return {
         ok: true,
@@ -618,24 +640,34 @@ export function step(
     }
 
     case 'throw': {
-      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to throw.', events };
+      if (!agent.inventory.includes('cube')) return { ok: false, message: 'You carry no cube to throw. Goto a strange cube and pick_up it first.', events };
       const dx = clampInt(action.data.dx, -3, 3);
       const dy = clampInt(action.data.dy, -3, 3);
-      if (dx === 0 && dy === 0) return { ok: false, message: 'Give the throw a direction (dx/dy, up to 3).', events };
+      if (dx === 0 && dy === 0) return { ok: false, message: 'A throw needs a direction. Choose dx/dy up to 3 — for example dx 2, dy 0.', events };
       const ux = Math.sign(dx);
       const uy = Math.sign(dy);
       const range = Math.max(Math.abs(dx), Math.abs(dy));
       let cur = { ...agent.pos };
       let flew = 0;
+      let rock: WorldObject | undefined;
       for (let i = 0; i < range; i++) {
         const next = { x: cur.x + ux, y: cur.y + uy };
-        if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE || !canStand(next) || tileOccupied(snapshot, next)) break;
+        if (next.x < 0 || next.y < 0 || next.x >= GRID_SIZE || next.y >= GRID_SIZE || !canStand(next)) break;
+        // the rock occupies its tile, so a cube that reaches it strikes it instead of stopping short
+        // (only a machine whose manifest behavior reacts to cubes; otherwise it is plain ground the cube stops before)
+        rock = snapshot.objects.find(
+          (o) => o.kind === 'rock' && o.pos.x === next.x && o.pos.y === next.y && THROWN_CUBE_BEHAVIOR.get(o.id) === 'spawn_two_cubes'
+        );
+        if (rock) {
+          flew++;
+          break;
+        }
+        if (tileOccupied(snapshot, next)) break;
         cur = next;
         flew++;
       }
-      if (flew === 0) return { ok: false, message: 'The way is blocked — the cube drops back into your hands.', events };
+      if (flew === 0) return { ok: false, message: 'The way is blocked — the cube drops back into your hands. Try throwing in another direction, or place it on an empty tile instead.', events };
       agent.inventory = agent.inventory.filter((i) => i !== 'cube');
-      const rock = snapshot.objects.find((o) => o.kind === 'rock' && o.pos.x === cur.x && o.pos.y === cur.y);
       if (rock) {
         const spawned: NonNullable<ActionResult['spawned']> = [];
         const spots: GridPos[] = [];
@@ -646,9 +678,10 @@ export function step(
             if (canStand(p) && !tileOccupied(snapshot, p) && !snapshot.agents.some((a) => a.pos.x === p.x && a.pos.y === p.y)) spots.push(p);
           }
         }
+        // two different tiles: a spot, once used, is not drawn again (no two cubes stacked on one tile)
         for (let i = 0; i < Math.min(2, spots.length); i++) {
-          const p = spots[Math.floor(Math.random() * spots.length)];
-          const id = `cube_${Date.now()}_${i}`;
+          const p = spots.splice(Math.floor(Math.random() * spots.length), 1)[0];
+          const id = allocId(snapshot, 'cube');
           snapshot.objects.push({ id, territory: territoryAt(p) ?? agent.island, pos: p, kind: 'cube', builtBy: 'the Standing Rock' });
           spawned.push({ id, pos: p, by: 'the Standing Rock' });
         }
@@ -659,7 +692,7 @@ export function step(
           spawned,
         };
       }
-      const id = `cube_${Date.now()}`;
+      const id = allocId(snapshot, 'cube');
       snapshot.objects.push({ id, territory: territoryAt(cur) ?? agent.island, pos: cur, kind: 'cube', builtBy: agent.name });
       return {
         ok: true,
@@ -712,33 +745,42 @@ export function step(
       };
 
     case 'chat': {
-      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
-      if (!target) return { ok: false, message: 'No such villager to chat with.', events };
-      if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again?', events };
+      const target = findVillager(snapshot, action.data.agent_id);
+      if (!target) return { ok: false, message: 'No such villager to chat with. Use an id from "Standing right beside you" or "Fellow villagers", and stand beside them first.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Talking to yourself again? Choose a villager standing beside you to chat with, or use say to speak aloud instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
       if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
       const msg = action.data.message.slice(0, 200);
+      // the target hears it in its next observation; beyond INBOX_LIMIT the oldest is lost
+      const pending = [...(target.inbox ?? []), { fromId: agent.id, fromName: agent.name, message: msg }];
+      const lost = pending.length > INBOX_LIMIT ? pending[0] : undefined;
+      target.inbox = pending.slice(-INBOX_LIMIT);
       return {
         ok: true,
         message: `You say to ${target.name}: "${msg}"`,
         events: [
           { type: 'chat', message: `${agent.name} to ${target.name}: "${msg}"` },
         ],
-        chat: { withId: target.id, withName: target.name, message: msg },
+        chat: {
+          withId: target.id,
+          withName: target.name,
+          message: msg,
+          ...(lost ? { dropped: { fromName: lost.fromName, message: lost.message } } : {}),
+        },
       };
     }
 
     case 'gift': {
-      const target = snapshot.agents.find((a) => a.id === action.data.agent_id);
-      if (!target) return { ok: false, message: 'No such villager to give to.', events };
-      if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing.', events };
+      const target = findVillager(snapshot, action.data.agent_id);
+      if (!target) return { ok: false, message: 'No such villager to give to. Use an id from "Standing right beside you", and stand beside them first.', events };
+      if (target.id === agent.id) return { ok: false, message: 'Giving to yourself changes nothing. Choose a villager standing beside you instead.', events };
       const dist = Math.max(Math.abs(target.pos.x - agent.pos.x), Math.abs(target.pos.y - agent.pos.y));
       if (dist > 1) return { ok: false, message: `${target.name} is too far away — march to a tile right beside them first.`, events };
       if (agent.inventory.length === 0) return { ok: false, message: 'Your hands are empty. Gather something before giving.', events };
       const wanted = action.data.item?.trim();
       const idx = wanted ? agent.inventory.indexOf(wanted) : 0;
-      if (idx === -1) return { ok: false, message: `You are not carrying ${wanted || 'that'}. Carrying: ${agent.inventory.join(', ') || 'nothing'}.`, events };
-      if (target.inventory.length >= 2) return { ok: false, message: `${target.name}'s hands are full — they cannot take more.`, events };
+      if (idx === -1) return { ok: false, message: `You are not carrying ${wanted || 'that'}. Carrying: ${agent.inventory.join(', ') || 'nothing'}. Choose one of those, or omit the item to give the first.`, events };
+      if (target.inventory.length >= 2) return { ok: false, message: `${target.name}'s hands are full — they cannot take more. Wait for them to deposit, or give to someone else instead.`, events };
       const item = agent.inventory.splice(idx, 1)[0];
       target.inventory.push(item);
       return {
@@ -750,8 +792,8 @@ export function step(
     }
 
     case 'eat': {
-      if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first.', events };
-      if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map.', events };
+      if (snapshot.civ.food < 1) return { ok: false, message: 'The stockpile has no food. Gather berries or hunt first, then deposit it at the Town Center.', events };
+      if (!snapshot.objects.some((o) => o.kind === 'town_center')) return { ok: false, message: 'There is no Town Center on the map, so there is nowhere to eat. Try something else meanwhile, such as wander.', events };
       snapshot.civ.food -= 1;
       return {
         ok: true,
@@ -775,7 +817,7 @@ export function step(
           !snapshot.agents.some((a) => a.id !== agent.id && a.pos.x === p.x && a.pos.y === p.y)
       );
       if (options.length === 0) {
-        return { ok: false, message: 'Every step around you is blocked. There is nowhere to wander.', events };
+        return { ok: false, message: 'Every step around you is blocked. There is nowhere to wander. Wait a turn for a neighbour to move, or chat to ask them to step aside.', events };
       }
       const fresh = options.filter((p) => !recent.has(`${p.x},${p.y}`));
       const pool = fresh.length ? fresh : options;
@@ -797,9 +839,23 @@ export function step(
     case 'wait':
       return { ok: true, message: 'You rest beside the road and watch the banners flutter.', events: [{ type: 'wait', message: `${agent.name} rests.` }] };
 
+    case 'plan':
+      // plans are unrolled into single steps by the simulation before step() runs
+      return { ok: false, message: 'A plan cannot be a step of another plan. Choose a single action for each step instead.', events };
+
     default:
-      return { ok: false, message: 'Unknown action.', events };
+      return unhandledAction(action, events);
   }
+}
+
+/**
+ * Compile-time exhaustiveness check for step(): `action` is `never` only while
+ * every ActionInput type has a case above. Adding a type to the union without a
+ * handler fails typecheck here. At runtime it still reports garbage input.
+ */
+function unhandledAction(action: never, events: ActionResult['events']): ActionResult {
+  void action;
+  return { ok: false, message: 'Unknown action. Choose one of the actions listed under "Actions you can take now", or wait.', events };
 }
 
 export function availableActions(snapshot: WorldSnapshot, agent: AgentState): string[] {
@@ -834,14 +890,14 @@ export function availableActions(snapshot: WorldSnapshot, agent: AgentState): st
   // exploration: the Standing Rock, strange cubes, the roads, and unvisited ground
   const rock = snapshot.objects.find((o) => o.kind === 'rock');
   if (rock && cheb(rock) > 1) {
-    acts.push(`- goto (${rock.pos.x},${rock.pos.y}): the Standing Rock, ${manhattan(rock.pos)} steps away — rumor says it reacts to thrown cubes`);
+    acts.push(`- goto (${rock.pos.x},${rock.pos.y}): the Standing Rock, ${manhattan(rock.pos)} steps away`);
   }
   if (!agent.inventory.includes('cube')) {
     const cube = snapshot.objects
       .filter((o) => o.kind === 'cube')
       .sort((a, b) => cheb(a) - cheb(b))[0];
     if (cube) {
-      acts.push(`- goto (${cube.pos.x},${cube.pos.y}): a strange cube, ${manhattan(cube.pos)} steps away (pick_up, then place or throw)`);
+      acts.push(`- goto (${cube.pos.x},${cube.pos.y}): a strange cube, ${manhattan(cube.pos)} steps away`);
     }
   }
   const here = territoryAt(agent.pos);
@@ -918,6 +974,10 @@ export function observe(
   }
   if (agent.inventory.length > 0 && closeBy.length) {
     lines.push('- gift {agent_id}: hand 1 carried item to a villager beside you — a gift deepens a bond');
+  }
+  if (agent.inbox?.length) {
+    lines.push('Words spoken to you since your last turn (answer if you like — no one forces a reply):');
+    for (const m of agent.inbox) lines.push(`- ${m.fromName} says: "${m.message.replace(/\s+/g, ' ')}"`);
   }
   if (history && history.length) {
     lines.push('Your last actions and what happened:');

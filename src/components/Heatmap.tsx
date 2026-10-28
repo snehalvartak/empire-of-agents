@@ -10,7 +10,7 @@ export interface PositionRow {
  * Aggregates position rows into per-tile counts for the heatmap overlay (F2.2).
  * Uses a viridis-like perceptual ramp from dim to bright gold.
  */
-export function useHeatmap(rows: PositionRow[], agents: Array<{ id: string; name: string }>) {
+export function useHeatmap(rows: PositionRow[]) {
   return useMemo(() => {
     const map = new Map<string, number>();
     for (const r of rows) {

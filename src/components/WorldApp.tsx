@@ -3,19 +3,20 @@ import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
   Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn, Lightbulb, Music,
 } from 'lucide-react';
-import { Timeline, Discoveries, detectKeyMoments, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
-import { useReplayPlayer, ReplayControls, type ReplayCheckpoint } from '@/components/ReplayPlayer';
+import { Timeline, Discoveries, type TimelineEvent, type DiscoveryEntry, type KeyMoment } from '@/components/PaperViews';
+import { ReplayControls } from '@/components/ReplayPlayer';
+import { toReplayCheckpoint, useReplayPlayer, type ReplayCheckpoint } from '@/components/replay';
+import { detectKeyMoments } from '@/components/paperUtils';
 import { useHeatmap } from '@/components/Heatmap';
-import { Panel, PixelButton, Badge } from '@/components/ui/Pixel';
+import { Panel } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
 import type { SessionRow } from '@/sim/simulation';
-import { resetWorldOnDeploy } from '@/sim/reset';
 import { soundOn, setSoundOn, playEventSound } from '@/lib/sounds';
 import { VoxelWorld } from '@/components/VoxelWorld';
 import { AgentAvatar } from '@/components/AgentAvatar';
 import type { TerritoryId, WorldSnapshot } from '@/sim/world';
-import { AGE_COSTS, AGE_NAMES, TERRITORIES, seedObjects } from '@/sim/world';
+import { AGE_COSTS, AGE_NAMES, MAX_VILLAGERS, TERRITORIES, seedObjects } from '@/sim/world';
 
 interface EventRow {
   id: string;
@@ -101,6 +102,7 @@ export default function WorldApp() {
   const [memories, setMemories] = useState<MemoryRow[]>([]);
   const [civ, setCiv] = useState<CivRow>({ wood: 0, food: 0, gold: 0, stone: 0, age: 1 });
   const [running, setRunning] = useState(sim.running);
+  const [driverNote, setDriverNote] = useState<string | null>(sim.driverNote);
   const [speed, setSpeed] = useState(sim.speed);
   const [error, setError] = useState<string | null>(sim.error);
   const [tick, setTick] = useState(0);
@@ -137,6 +139,10 @@ export default function WorldApp() {
   const [showNewSession, setShowNewSession] = useState(false);
   const [carryMemories, setCarryMemories] = useState(true);
   const [sessionBusy, setSessionBusy] = useState(false);
+  const [cpTicks, setCpTicks] = useState<Record<string, number>>({});
+  const [forkBusy, setForkBusy] = useState<string | null>(null);
+  const [confirmFork, setConfirmFork] = useState<string | null>(null);
+  const [forkNotice, setForkNotice] = useState<{ id: string; ok: boolean; message: string } | null>(null);
   const [endedNotice, setEndedNotice] = useState<string | null>(null);
   const [hotbarFocus, setHotbarFocus] = useState<string | null>(null);
   const [bubblesOn, setBubblesOn] = useState(() => {
@@ -154,6 +160,7 @@ export default function WorldApp() {
     void loadAll();
     const unsub = sim.subscribe(() => {
       setRunning(sim.running);
+      setDriverNote(sim.driverNote);
       setSpeed(sim.speed);
       setError(sim.error);
       setTick(sim.snapshot.tick);
@@ -247,7 +254,6 @@ export default function WorldApp() {
   }
 
   async function loadAll() {
-    await resetWorldOnDeploy();
     await sim.load();
     setSessionId(sim.session?.id ?? null);
     setSessionTitle(sim.session?.title ?? null);
@@ -265,6 +271,35 @@ export default function WorldApp() {
   async function refreshSessions() {
     const { data } = await supabase.from('sessions').select('*').order('seq', { ascending: false });
     setSessions((data ?? []) as unknown as SessionRow[]);
+    // latest checkpoint per era: "Continue from here" needs one to exist
+    const { data: cps } = await supabase.from('checkpoints').select('session_id, tick');
+    const latest: Record<string, number> = {};
+    for (const c of cps ?? []) if (c.session_id) latest[c.session_id] = Math.max(latest[c.session_id] ?? 0, c.tick);
+    setCpTicks(latest);
+  }
+
+  /** Forks a new live era from an archived era's latest checkpoint; a live era must be ended first, so ask once. */
+  async function continueFrom(s: SessionRow) {
+    if (sessionId && confirmFork !== s.id) {
+      setConfirmFork(s.id);
+      return;
+    }
+    setConfirmFork(null);
+    setForkBusy(s.id);
+    const res = await sim.forkFromCheckpoint(s.id);
+    setForkBusy(null);
+    setForkNotice({ id: s.id, ok: res.ok, message: res.message });
+    setSessionId(sim.session?.id ?? null);
+    setSessionTitle(sim.session?.title ?? null);
+    if (res.ok) {
+      setEndedNotice(null);
+      setViewing('live');
+      setArchivedSnapshot(null);
+      setCheckpoints([]);
+      setInspectAgent(null);
+    }
+    await refreshSessions();
+    if (res.ok && sim.session) await loadFeed(sim.session.id);
   }
 
   async function loadFeed(sid: string) {
@@ -291,10 +326,7 @@ export default function WorldApp() {
       .select('tick, snapshot')
       .eq('session_id', s.id)
       .order('tick', { ascending: true });
-    const cps: ReplayCheckpoint[] = (cpRows ?? []).map((r) => ({
-      tick: r.tick,
-      snapshot: r.snapshot as WorldSnapshot,
-    }));
+    const cps = (cpRows ?? []).flatMap((r) => toReplayCheckpoint(r) ?? []);
     setCheckpoints(cps);
     replay.reset(0);
     const { data: agentRows } = await supabase.from('agents').select('*').eq('session_id', s.id);
@@ -329,6 +361,7 @@ export default function WorldApp() {
       civ: civRow
         ? { wood: civRow.wood, food: civRow.food, gold: civRow.gold, stone: civRow.stone, age: civRow.age }
         : { wood: s.wood ?? 0, food: s.food ?? 0, gold: s.gold ?? 0, stone: s.stone ?? 0, age: s.age ?? 1 },
+      nextId: 1,
     });
     setViewing(s.id);
     setInspectAgent(null);
@@ -409,7 +442,7 @@ export default function WorldApp() {
   const replayCiv = sim.history.length ? sim.history[Math.min(replayTick, sim.history.length - 1)].civ : null;
 
   const replay = useReplayPlayer(checkpoints, viewing !== 'live' && checkpoints.length > 0);
-  const heatTiles = useHeatmap(heatRows, agents.map((a) => ({ id: a.id, name: a.name })));
+  const heatTiles = useHeatmap(heatRows);
   const viewingArchived = viewing !== 'live' ? sessions.find((s) => s.id === viewing) ?? null : null;
   const replayActive = viewingArchived !== null && checkpoints.length > 0;
   const worldSnapshot = replayActive && replay.current ? replay.current.snapshot : viewingArchived ? archivedSnapshot : sim.snapshot;
@@ -482,11 +515,11 @@ export default function WorldApp() {
                   </button>
                 ) : (
                   <button
-                    onClick={() => sim.start()}
+                    onClick={() => void sim.start()}
                     disabled={agents.length === 0}
                     className="rounded-lg border border-amber-600/60 bg-amber-600/90 px-4 py-1.5 text-sm font-bold text-[#1a140d] hover:bg-amber-500 disabled:opacity-40"
                   >
-                    Begin
+                    {driverNote ? 'Try to take over' : 'Begin'}
                   </button>
                 )}
                 <button
@@ -636,6 +669,12 @@ export default function WorldApp() {
             )}
           </div>
 
+          {viewing === 'live' && driverNote && (
+            <p className="rounded-lg border border-amber-700/40 bg-amber-900/20 px-3 py-2 text-xs text-amber-200">
+              {driverNote}
+            </p>
+          )}
+
           {viewing === 'live' && (
             <div className="flex items-center gap-2 text-xs text-amber-100/60">
               <span>Chronicle pace:</span>
@@ -643,7 +682,8 @@ export default function WorldApp() {
                 <button
                   key={s}
                   onClick={() => sim.setSpeed(s)}
-                  className={`rounded-md px-2.5 py-1 capitalize ${
+                  disabled={!!driverNote}
+                  className={`rounded-md px-2.5 py-1 capitalize disabled:opacity-40 ${
                     speed === s
                       ? 'bg-amber-600/30 text-amber-200'
                       : 'hover:bg-amber-900/30'
@@ -726,9 +766,14 @@ export default function WorldApp() {
                     className="mt-2 w-full rounded-lg border border-amber-900/50 bg-[#0f0b07] px-3 py-2 text-sm text-amber-50 outline-none focus:border-amber-600/60"
                   />
                 </div>
+                {agents.length >= MAX_VILLAGERS && (
+                  <p className="text-xs text-red-300">
+                    This world holds at most {MAX_VILLAGERS} villagers and every place is taken. Dismiss a villager to make room.
+                  </p>
+                )}
                 <button
                   onClick={() => void addAgent()}
-                  disabled={adding || !name.trim()}
+                  disabled={adding || !name.trim() || agents.length >= MAX_VILLAGERS || !!driverNote}
                   className="w-full rounded-lg border border-amber-600/60 bg-amber-600/90 py-2 text-sm font-bold text-[#1a140d] hover:bg-amber-500 disabled:opacity-40"
                 >
                   {adding ? 'Recruiting...' : 'Join the empire'}
@@ -805,7 +850,8 @@ export default function WorldApp() {
                   {viewing === 'live' && (
                     <button
                       onClick={() => void sim.removeAgent(a.id)}
-                      className="rounded-md px-2 py-1 text-xs text-amber-100/40 hover:bg-red-950/40 hover:text-red-300"
+                      disabled={!!driverNote}
+                      className="rounded-md px-2 py-1 text-xs text-amber-100/40 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-40"
                     >
                       Dismiss
                     </button>
@@ -819,7 +865,7 @@ export default function WorldApp() {
         {/* right column */}
         <div className="space-y-4">
           <Panel>
-            <div className="flex border-b border-amber-900/40">
+            <div className="flex flex-wrap border-b border-amber-900/40">
               <button
                 onClick={() => setTab('log')}
                 className={`flex flex-1 items-center justify-center gap-2 px-4 py-3 text-sm ${
@@ -1047,8 +1093,8 @@ export default function WorldApp() {
                         {sessions
                           .filter((s) => s.status === 'archived')
                           .map((s) => (
+                            <div key={s.id}>
                             <button
-                              key={s.id}
                               onClick={() => (viewing === s.id ? returnToLive() : void viewArchived(s))}
                               className={`w-full rounded-lg border px-3 py-2 text-left ${
                                 viewing === s.id
@@ -1078,6 +1124,33 @@ export default function WorldApp() {
                                 <div className="mt-0.5 text-xs text-amber-100/50">{s.summary}</div>
                               )}
                             </button>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 px-1">
+                              <button
+                                onClick={() => void continueFrom(s)}
+                                disabled={cpTicks[s.id] === undefined || forkBusy !== null}
+                                title={
+                                  cpTicks[s.id] === undefined
+                                    ? 'No checkpoint was recorded for this era, so it cannot be continued.'
+                                    : `Start a new era from this one's latest checkpoint (tick ${cpTicks[s.id]})`
+                                }
+                                className="rounded-lg border border-amber-700/50 px-3 py-1 text-xs text-amber-200 hover:bg-amber-900/30 disabled:opacity-40"
+                              >
+                                {forkBusy === s.id
+                                  ? 'Continuing…'
+                                  : confirmFork === s.id
+                                    ? 'Confirm: this ends the current era'
+                                    : 'Continue from here'}
+                              </button>
+                              {cpTicks[s.id] === undefined && (
+                                <span className="text-[10px] text-amber-100/40">No checkpoint was recorded for this era.</span>
+                              )}
+                              {forkNotice?.id === s.id && (
+                                <span className={`text-[11px] ${forkNotice.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+                                  {forkNotice.message}
+                                </span>
+                              )}
+                            </div>
+                            </div>
                           ))}
                       </div>
                     )}

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { TerritoryId, WorldObject, WorldSnapshot } from '@/sim/world';
+import type { TerritoryId, WorldObject } from '@/sim/world';
 import { GRID_SIZE, isRoad, territoryAt } from '@/sim/world';
 
 export const TILE = 1;

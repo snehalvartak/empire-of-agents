@@ -449,13 +449,16 @@ async function scenarioSingleDriver() {
 
   // close p1: the lease is released by pagehide (not by waiting out the 30 s TTL)
   const tBeforeClose = maxTick(era);
+  const logBeforeClose = gw.log.length;
   await p1.close({ runBeforeUnload: true });
   const closedAt = Date.now();
   const freed = await waitFor('p1 closed -> lease free', () => eraRow(era).driver_id === null, { timeout: 8000 }).then(() => true, () => false);
   check(`closing p1 released the lease within ${((Date.now() - closedAt) / 1000).toFixed(1)} s (pagehide/beforeunload), without waiting for the ${DRIVER_TTL_MS / 1000} s TTL`, freed, json(eraRow(era)));
-  const unloadRelease = requestsOf('p1', isRpc('release_session_lease')).pop();
-  check('the unload release was the keepalive POST /rest/v1/rpc/release_session_lease naming p1\'s id, answered true',
-    unloadRelease && unloadRelease.status === 200 && unloadRelease.responseSnippet.trim() === 'true' && JSON.parse(unloadRelease.body).p_driver === S.driverA && JSON.parse(unloadRelease.body).p_session === era, json(unloadRelease));
+  // pagehide and beforeunload both send it: the first frees the lease (true), a second finds nothing of p1's to free (false)
+  const unloadReleases = gw.log.slice(logBeforeClose).filter((e) => e.page === 'p1' && isRpc('release_session_lease')(e));
+  check('the unload release was the keepalive POST /rest/v1/rpc/release_session_lease naming p1\'s id: HTTP 200, one answered true (the other, if any, false)',
+    unloadReleases.length >= 1 && unloadReleases.every((r) => r.status === 200 && JSON.parse(r.body).p_driver === S.driverA && JSON.parse(r.body).p_session === era)
+    && unloadReleases.filter((r) => r.responseSnippet.trim() === 'true').length === 1, json(unloadReleases));
   if (!freed) {
     note('p1\'s close did not release the lease; waiting out the TTL instead');
     await waitFor('lease stale', () => Date.now() - Date.parse(eraRow(era).driver_heartbeat_at) > DRIVER_TTL_MS + 1000, { timeout: 45000, interval: 500 });
@@ -668,51 +671,83 @@ async function scenarioAnon() {
   const policies = q("SELECT relname, relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r'");
   note(`every public table has RLS on (${policies.filter((p) => p.relrowsecurity).length}/${policies.length}) but every policy except settings is USING (true) for anon: anyone holding the public anon key can read, rewrite or delete every era`);
 
-  // the lease claim, built by the real supabase-js client (Node) against the same gateway the browser used
+  // the lease functions, called by the real supabase-js client (Node) against the same gateway the browser used.
+  // The database's clock decides: the heartbeat is set relative to the DATABASE's now(), the client sends no time.
   const sb = createClient(gw.url, stack.anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const lid = x("INSERT INTO sessions (seq, title, status) VALUES (99002, 'e2e lease scratch', 'archived') RETURNING id").split('\n')[0];
-  const claim = async (me, nowMs) => {
+  const rpc = async (fn, args) => {
     const n = gw.log.length;
-    const r = await sb.from('sessions').update({ driver_id: me, driver_heartbeat_at: new Date(nowMs).toISOString() }).eq('id', lid).or(leaseClaimFilter(me, nowMs)).select();
-    return { ...r, request: gw.log.slice(n).find((e) => e.method === 'PATCH') };
+    const r = await sb.rpc(fn, { p_session: lid, ...args });
+    return { ...r, request: gw.log.slice(n).find((e) => e.method === 'POST' && e.url.includes(`/rpc/${fn}`)) };
   };
+  const claim = (me, ttl = DRIVER_TTL_SECONDS) => rpc('claim_session_lease', { p_driver: me, p_ttl_seconds: ttl });
   const setLease = (d, ageSec) => x(`UPDATE sessions SET driver_id=${d ? lit(d) : 'NULL'}, driver_heartbeat_at=${ageSec === null ? 'NULL' : `now() - interval '${ageSec} seconds'`} WHERE id=${lit(lid)}`);
   setLease('someone-else', 5);
-  const fresh = await claim('me-node-1', Date.now());
-  check('lease via real supabase-js .or(): a FRESH lease (5 s old) held by someone else is refused: HTTP 200, zero rows, holder unchanged', !fresh.error && fresh.data.length === 0 && eraRow(lid).driver_id === 'someone-else', json([fresh.error, fresh.data]));
+  const fresh = await claim('me-node-1');
+  check('lease via real supabase-js rpc: a FRESH lease (5 s old) held by someone else is refused: HTTP 200, false, holder unchanged', !fresh.error && fresh.data === false && fresh.request?.status === 200 && eraRow(lid).driver_id === 'someone-else', json([fresh.error, fresh.data]));
+  setLease('someone-else', 29);
+  const nearly = await claim('me-node-1');
+  check('lease: a 29 s-old lease is still refused (1 s inside the TTL)', !nearly.error && nearly.data === false && eraRow(lid).driver_id === 'someone-else', json([nearly.error, nearly.data]));
   setLease('someone-else', 31);
-  const stale = await claim('me-node-1', Date.now());
-  check('lease via real supabase-js .or(): a STALE lease (31 s) is taken over: one row back and the database names the new holder', !stale.error && stale.data.length === 1 && stale.data[0].driver_id === 'me-node-1' && eraRow(lid).driver_id === 'me-node-1', json([stale.error, stale.data]));
+  const stale = await claim('me-node-1');
+  check('lease via real supabase-js rpc: a STALE lease (31 s) is taken over: true and the database names the new holder', !stale.error && stale.data === true && eraRow(lid).driver_id === 'me-node-1', json([stale.error, stale.data]));
   setLease(null, null);
-  const free = await claim('me-node-2', Date.now());
-  check('lease: a free era (driver_id null) is claimed', !free.error && free.data.length === 1 && free.data[0].driver_id === 'me-node-2');
+  const free = await claim('me-node-2');
+  check('lease: a free era (driver_id null) is claimed', !free.error && free.data === true && eraRow(lid).driver_id === 'me-node-2');
   setLease('someone-else', null);
-  const noBeat = await claim('me-node-3', Date.now());
-  check('lease: a driver without any heartbeat is taken over', !noBeat.error && noBeat.data.length === 1 && noBeat.data[0].driver_id === 'me-node-3');
+  const noBeat = await claim('me-node-3');
+  check('lease: a driver without any heartbeat is taken over', !noBeat.error && noBeat.data === true && eraRow(lid).driver_id === 'me-node-3');
   setLease('me-node-3', 1);
-  const renew = await claim('me-node-3', Date.now());
-  check('lease: the current driver renews its own fresh lease', !renew.error && renew.data.length === 1);
-  // exactly TTL old counts as stale (lte)
-  const edgeNow = Date.parse('2027-01-15T08:00:30.000Z');
-  x(`UPDATE sessions SET driver_id='someone-else', driver_heartbeat_at='2027-01-15T08:00:00.000Z' WHERE id=${lit(lid)}`);
-  const edge = await claim('me-node-4', edgeNow);
-  x(`UPDATE sessions SET driver_id='someone-else', driver_heartbeat_at='2027-01-15T08:00:00.001Z' WHERE id=${lit(lid)}`);
-  const edge2 = await claim('me-node-5', edgeNow);
-  check('lease: a heartbeat exactly 30 s old is stale (lte), 1 ms newer is fresh — evaluated by PostgREST/PostgreSQL on timestamptz', !edge.error && edge.data.length === 1 && !edge2.error && edge2.data.length === 0);
+  const renewByClaim = await claim('me-node-3');
+  check('lease: the current driver renews its own fresh lease by claiming again', !renewByClaim.error && renewByClaim.data === true);
+  // a heartbeat set to now() - 30 s has aged at least 30 s by the time the call arrives, so it is at or past the boundary: stale.
+  // (The exact-instant boundary, with now() frozen, is asserted in check:migrations; over HTTP each call is its own transaction.)
+  setLease('someone-else', 30);
+  const edge = await claim('me-node-4');
+  setLease('someone-else', 29);
+  const edge2 = await claim('me-node-5');
+  check('lease: a heartbeat 30 s old is stale, 29 s old is fresh — evaluated by PostgreSQL on timestamptz with its own clock', !edge.error && edge.data === true && !edge2.error && edge2.data === false);
+  setLease('someone-else', 45);
+  const ttl60 = await claim('me-node-6', 60);
+  setLease('someone-else', 45);
+  const ttl40 = await claim('me-node-6', 40);
+  check('lease: the ttl argument is honoured through PostgREST (a 45 s-old lease is fresh for 60 s, stale for 40 s)', ttl60.data === false && ttl40.data === true, json([ttl60.data, ttl40.data]));
+  // renew / release / state
+  setLease('owner-1', 20);
+  const hbBefore = eraRow(lid).driver_heartbeat_at;
+  const renewOwner = await rpc('renew_session_lease', { p_driver: 'owner-1' });
+  const hbAfter = eraRow(lid).driver_heartbeat_at;
+  check('renew via rpc: the owner gets true and the database advances the heartbeat', renewOwner.data === true && Date.parse(hbAfter) > Date.parse(hbBefore));
+  const rowJson = () => json(eraRow(lid));
+  const beforeNon = rowJson();
+  const renewNon = await rpc('renew_session_lease', { p_driver: 'not-the-owner' });
+  const releaseNon = await rpc('release_session_lease', { p_driver: 'not-the-owner' });
+  check('renew / release by a non-owner: both false and the row is unchanged', renewNon.data === false && releaseNon.data === false && rowJson() === beforeNon, json([renewNon.data, releaseNon.data]));
+  const stateOther = await rpc('session_lease_state', { p_driver: 'not-the-owner', p_ttl_seconds: DRIVER_TTL_SECONDS });
+  const stateMine = await rpc('session_lease_state', { p_driver: 'owner-1', p_ttl_seconds: DRIVER_TTL_SECONDS });
+  setLease('owner-1', 600);
+  const stateStaleOther = await rpc('session_lease_state', { p_driver: 'not-the-owner', p_ttl_seconds: DRIVER_TTL_SECONDS });
+  setLease(null, null);
+  const stateFree = await rpc('session_lease_state', { p_driver: 'not-the-owner', p_ttl_seconds: DRIVER_TTL_SECONDS });
+  check('session_lease_state via rpc: other (fresh, someone else\'s), mine, free (stale), free (nobody)', json([stateOther.data, stateMine.data, stateStaleOther.data, stateFree.data]) === json(['other', 'mine', 'free', 'free']), json([stateOther.data, stateMine.data, stateStaleOther.data, stateFree.data]));
+  setLease('owner-1', 2);
+  const releaseOwner = await rpc('release_session_lease', { p_driver: 'owner-1' });
+  const freed = eraRow(lid);
+  check('release via rpc: the owner gets true and driver_id and driver_heartbeat_at are NULL', releaseOwner.data === true && freed.driver_id === null && freed.driver_heartbeat_at === null);
+  const grants = q("SELECT p.proname, p.prosecdef FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('claim_session_lease','renew_session_lease','release_session_lease','session_lease_state')");
+  check('the four functions PostgREST exposed are SECURITY INVOKER: the call ran with anon\'s own rights and RLS', grants.length === 4 && grants.every((g) => g.prosecdef === false), json(grants));
   x(`DELETE FROM sessions WHERE id=${lit(lid)}`);
 
-  // the URLs as sent
+  // the requests as sent
   const decoded = (u) => decodeURIComponent(u);
   console.log('      lease claim request as the supabase-js client sent it (stale case):');
-  console.log(`        PATCH ${decoded(stale.request.url).replace(lid, '<era id>')}`);
-  console.log(`        body  ${stale.request.body}  ->  HTTP ${stale.request.status} ${stale.request.responseSnippet.slice(0, 80)}...`);
-  const shape = (u) => decoded(u).replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, '<uuid>').replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, '<iso>').replace(/me-node-\d/g, '<uuid>');
-  const browserShape = S.takeoverClaim ? shape(S.takeoverClaim.url) : null;
-  console.log(`      the same request from the browser bundle (p2 takeover):\n        PATCH ${S.takeoverClaim ? decoded(S.takeoverClaim.url) : '(not captured)'}`);
-  check('the browser bundle and the Node client send the same claim URL shape (PATCH /sessions?id=eq.<uuid>&or=(driver_id.is.null,driver_id.eq.<me>,driver_heartbeat_at.is.null,driver_heartbeat_at.lte.<iso>) &select=*)',
-    browserShape && browserShape === shape(stale.request.url), `${browserShape}\n${shape(stale.request.url)}`);
-  const sentAt = Date.parse(JSON.parse(stale.request.body).driver_heartbeat_at); // the claim writes the same `now` it filters with
-  check('the filter in the URL is exactly leaseClaimFilter(me, now) inside or=(...)', decoded(stale.request.url).includes(`or=(${leaseClaimFilter('me-node-1', sentAt)})`), decoded(stale.request.url));
+  console.log(`        POST ${decoded(stale.request.url)}`);
+  console.log(`        body  ${stale.request.body.replace(lid, '<era id>')}  ->  HTTP ${stale.request.status} ${stale.request.responseSnippet.slice(0, 80)}`);
+  const bodyShape = (r) => json(Object.keys(JSON.parse(r.body)).sort());
+  console.log(`      the same request from the browser bundle (p2 takeover):\n        POST ${S.takeoverClaim ? decoded(S.takeoverClaim.url) : '(not captured)'}  ${S.takeoverClaim ? S.takeoverClaim.body.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, '<uuid>') : ''}`);
+  check('the browser bundle and the Node client send the same claim request: POST /rest/v1/rpc/claim_session_lease with a body of exactly p_driver, p_session, p_ttl_seconds (no timestamp)',
+    S.takeoverClaim && S.takeoverClaim.url === stale.request.url && bodyShape(S.takeoverClaim) === bodyShape(stale.request) && bodyShape(stale.request) === json(['p_driver', 'p_session', 'p_ttl_seconds'])
+    && JSON.parse(S.takeoverClaim.body).p_ttl_seconds === DRIVER_TTL_SECONDS, `${S.takeoverClaim?.url} ${S.takeoverClaim?.body}\n${stale.request.url} ${stale.request.body}`);
   const denied = S.deniedClaim;
   console.log(`      denied claim from p2 (browser): HTTP ${denied?.status}, body returned ${denied?.responseSnippet}`);
   const memFilter = S.memoryReq ? decodeURIComponent(S.memoryReq.url) : '(not captured)';
@@ -857,6 +892,133 @@ async function scenarioBondRetry() {
   await ctx3.close();
 }
 
+// =============================================================================================== h) clock skew between windows
+/** Runs in the page before any script: Date / Date.now() read `offsetMs` ahead of (or, negative, behind) the real clock. Timers are untouched. */
+function skewDate(offsetMs) {
+  const Real = Date;
+  const now = () => Real.now() + offsetMs;
+  globalThis.Date = new Proxy(Real, {
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length ? args : [now()], newTarget),
+    apply: () => new Real(now()).toString(),
+    get: (target, prop, receiver) => (prop === 'now' ? now : Reflect.get(target, prop, receiver)),
+  });
+}
+
+async function scenarioClockSkew() {
+  section('h) clock skew: windows whose clocks are 5 minutes ahead / behind cannot steal a live lease, and can still take a dead one');
+  const era = S.fork.id;
+  const driver = S.p2; // a normal-clock window on the live fork era
+  const MIN5 = 5 * 60 * 1000;
+  const dbAge = (id) => q(`SELECT extract(epoch FROM now() - driver_heartbeat_at)::float AS s FROM sessions WHERE id=${lit(id)}`)[0].s;
+
+  async function openSkewed(label, offsetMs) {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: { 'x-e2e-page': label } });
+    await ctx.addInitScript(skewDate, offsetMs);
+    const page = await openApp(ctx, label);
+    const t0 = Date.now();
+    const pageNow = await page.evaluate(() => Date.now());
+    const pageIso = await page.evaluate(() => new Date().toISOString());
+    const t1 = Date.now();
+    const skew = pageNow - (t0 + t1) / 2;
+    check(`${label}: the skew really took effect: Date.now() in the page is ${(skew / 1000).toFixed(1)} s from the Node clock (wanted ${offsetMs / 1000} s)`,
+      Math.abs(skew - offsetMs) < 3000 && Math.abs(Date.parse(pageIso) - (t0 + t1) / 2 - offsetMs) < 3000, `${skew} ${pageIso}`);
+    return { ctx, page };
+  }
+  const state = async (label) => requestsOf(label, isLeaseRead).pop();
+
+  // a normal driver
+  await btn(driver, SPEED).click();
+  await btn(driver, 'Begin').click();
+  const driverId = (await waitFor('the driver holds the lease', () => eraRow(era).driver_id, { timeout: 20000 }));
+  const tickStart = maxTick(era);
+  await waitFor('the driver writes a tick', () => maxTick(era) > tickStart, { timeout: 30000 });
+
+  const ahead = await openSkewed('p-ahead', MIN5);
+  const behind = await openSkewed('p-behind', -MIN5);
+  for (const [label, w] of [['p-ahead', ahead], ['p-behind', behind]]) {
+    await waitVillagers(w.page);
+    check(`${label} (clock off by 5 min) still shows the watch-mode banner and offers "Try to take over"`, (await w.page.getByText(WATCH_BANNER).isVisible()) && (await btn(w.page, 'Try to take over').isVisible()));
+    const st = await state(label);
+    check(`${label}: the database said "other" (session_lease_state), whatever its own clock reads`, st && st.responseSnippet.trim() === '"other"', json(st));
+  }
+
+  // the driver beats at least twice while the skewed windows sit there
+  const seen = new Set();
+  let beats = 0;
+  let last = eraRow(era).driver_heartbeat_at;
+  const t0 = Date.now();
+  await waitFor('two heartbeats of the driver', () => {
+    const r = eraRow(era);
+    seen.add(r.driver_id);
+    if (r.driver_heartbeat_at !== last) { beats++; last = r.driver_heartbeat_at; }
+    return beats >= 2;
+  }, { timeout: 45000, interval: 250 });
+  check(`across ${beats} driver heartbeats (${((Date.now() - t0) / 1000).toFixed(0)} s) sessions.driver_id was only ever the driver's (${[...seen].length} distinct value)`, seen.size === 1 && seen.has(driverId), json([...seen]));
+  for (const label of ['p-ahead', 'p-behind']) {
+    check(`${label} sent no write (and no claim) while watching`, requestsOf(label, isWrite).length === 0, requestsOf(label, isWrite).map((e) => `${e.method} ${e.url}`).join('\n'));
+  }
+
+  // they try to take over from the live driver: refused by the database clock
+  for (const [label, w] of [['p-ahead', ahead], ['p-behind', behind]]) {
+    const n = gw.log.length;
+    await btn(w.page, 'Try to take over').click();
+    const denied = await waitFor(`${label}: the denied claim`, () => gw.log.slice(n).find((e) => e.page === label && isClaim(e)), { timeout: 10000 });
+    check(`${label} "Try to take over" against the live driver: false, still a watcher, lease still the driver's`,
+      denied.status === 200 && denied.responseSnippet.trim() === 'false' && (await w.page.getByText(WATCH_BANNER).isVisible()) && eraRow(era).driver_id === driverId, json(denied));
+  }
+  await shot(ahead.page, 'h1-ahead-watcher');
+
+  // the driver stops (its lease is released); a "ghost" driver that crashed 5 s ago still counts as live, whatever the clocks say
+  await haltAndSettle(driver, era, 'driver');
+  x(`UPDATE sessions SET driver_id='e2e-ghost', driver_heartbeat_at=now() - interval '5 seconds' WHERE id=${lit(era)}`);
+  let n = gw.log.length;
+  await btn(ahead.page, 'Try to take over').click();
+  const ghostFresh = await waitFor('p-ahead: claim against the 5 s-old ghost', () => gw.log.slice(n).find((e) => e.page === 'p-ahead' && isClaim(e)), { timeout: 10000 });
+  check('a lease 5 s old is FRESH for the window whose clock is 5 min ahead (a client-side cutoff would have called it stale): refused, ghost still holds it',
+    ghostFresh.responseSnippet.trim() === 'false' && eraRow(era).driver_id === 'e2e-ghost' && (await ahead.page.getByText(WATCH_BANNER).isVisible()));
+  // a ghost 31 s old is dead, also for the window whose clock is 5 min behind (a client-side cutoff would have called it fresh)
+  x(`UPDATE sessions SET driver_id='e2e-ghost', driver_heartbeat_at=now() - interval '31 seconds' WHERE id=${lit(era)}`);
+  n = gw.log.length;
+  await btn(behind.page, 'Try to take over').click();
+  await behind.page.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
+    () => check('a lease 31 s old is STALE for the window whose clock is 5 min behind: it takes over (banner gone)', true),
+    () => check('a lease 31 s old is STALE for the window whose clock is 5 min behind: it takes over (banner gone)', false, 'banner still visible'));
+  const behindClaim = gw.log.slice(n).find((e) => e.page === 'p-behind' && isClaim(e));
+  const behindId = eraRow(era).driver_id;
+  check('DB: driver_id is now p-behind\'s id (from its claim body), the claim answered true', behindId && behindId !== 'e2e-ghost' && behindClaim && JSON.parse(behindClaim.body).p_driver === behindId && behindClaim.responseSnippet.trim() === 'true', json([behindId, behindClaim]));
+  check('the heartbeat the 5-min-behind window wrote is the DATABASE\'s time: it is seconds old by the database clock, not 5 minutes off', Math.abs(dbAge(era)) < 10, `${dbAge(era)} s`);
+  const tickBehind = maxTick(era);
+  await btn(behind.page, SPEED).click();
+  const hb = eraRow(era).driver_heartbeat_at;
+  await expectWait('p-behind renews its lease (driver_heartbeat_at advances) and keeps it', () => eraRow(era).driver_heartbeat_at !== hb && eraRow(era).driver_id === behindId && Math.abs(dbAge(era)) < 12, { timeout: 20000, interval: 250 });
+  await expectWait('p-behind drives: a new tick is written', () => maxTick(era) > tickBehind, { timeout: 30000 });
+
+  // while p-behind drives, the other skewed window is refused again
+  n = gw.log.length;
+  await btn(ahead.page, 'Try to take over').click();
+  const again = await waitFor('p-ahead: claim against p-behind', () => gw.log.slice(n).find((e) => e.page === 'p-ahead' && isClaim(e)), { timeout: 10000 });
+  check('p-ahead is refused while p-behind drives; the lease stays p-behind\'s', again.responseSnippet.trim() === 'false' && eraRow(era).driver_id === behindId);
+
+  // p-behind stops: the window 5 min ahead can take over a free lease
+  await haltAndSettle(behind.page, era, 'p-behind');
+  n = gw.log.length;
+  await btn(ahead.page, 'Try to take over').click();
+  await ahead.page.getByText(WATCH_BANNER).waitFor({ state: 'hidden', timeout: 15000 }).then(
+    () => check('after p-behind stopped, the window whose clock is 5 min ahead takes over (banner gone)', true),
+    () => check('after p-behind stopped, the window whose clock is 5 min ahead takes over (banner gone)', false, 'banner still visible'));
+  const aheadId = eraRow(era).driver_id;
+  const aheadClaim = gw.log.slice(n).find((e) => e.page === 'p-ahead' && isClaim(e));
+  check('DB: driver_id is now p-ahead\'s id, and its heartbeat is the database\'s time (seconds old, not 5 minutes ahead)', aheadId && aheadId !== behindId && aheadClaim && JSON.parse(aheadClaim.body).p_driver === aheadId && Math.abs(dbAge(era)) < 10, `${aheadId} ${dbAge(era)} s`);
+  const hb2 = eraRow(era).driver_heartbeat_at;
+  await expectWait('p-ahead renews its lease and keeps it for a heartbeat', () => eraRow(era).driver_heartbeat_at !== hb2 && eraRow(era).driver_id === aheadId && Math.abs(dbAge(era)) < 12, { timeout: 20000, interval: 250 });
+  await haltAndSettle(ahead.page, era, 'p-ahead');
+  const allTicks = q(`SELECT tick FROM agent_positions WHERE session_id=${lit(era)} ORDER BY tick`).map((r) => r.tick);
+  check('DB: still exactly one position row per tick across all the hand-overs (two drivers would double-write ticks)', allTicks.every((v, i) => v === allTicks[0] + i) && new Set(allTicks).size === allTicks.length, json(allTicks.slice(-12)));
+  await shot(ahead.page, 'h2-ahead-took-over');
+  await ahead.ctx.close();
+  await behind.ctx.close();
+}
+
 // =============================================================================================== the run
 async function main() {
   outDir = makeOutDir();
@@ -884,6 +1046,7 @@ async function main() {
     ['e', scenarioFork, 'b (checkpoint)'],
     ['f', scenarioAnon, null],
     ['g (bond retry)', scenarioBondRetry, 'e'],
+    ['h (clock skew)', scenarioClockSkew, 'e'],
   ];
   const failed = new Set();
   const only = (process.env.E2E_ONLY || '').split(',').filter(Boolean); // development aid: E2E_ONLY="a,d (chat)"

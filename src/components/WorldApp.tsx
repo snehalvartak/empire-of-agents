@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, BookOpen, ScrollText, Swords, TreePine, Wheat, Coins, Mountain, History, UserSearch,
   Archive, PlayCircle, Eye, ArrowLeft, Zap, Volume2, VolumeX, ChartNoAxesColumn, Lightbulb, Music,
@@ -11,6 +11,9 @@ import { useHeatmap } from '@/components/Heatmap';
 import { Panel } from '@/components/ui/Pixel';
 import { supabase } from '@/lib/supabase';
 import { sim } from '@/sim/simulation';
+import {
+  EVENT_LIMIT, MEMORY_LIMIT, WATCH_REFRESH_MS, mergeRows, newRows, pollDelay, pollPlan, pollSince, watchRefreshPlan,
+} from '@/sim/feed';
 import type { SessionRow } from '@/sim/simulation';
 import { soundOn, setSoundOn, playEventSound } from '@/lib/sounds';
 import { VoxelWorld } from '@/components/VoxelWorld';
@@ -156,6 +159,76 @@ export default function WorldApp() {
   const [civDeltas, setCivDeltas] = useState<Record<string, number>>({});
   const prevCivRef = useRef<CivRow | null>(null);
 
+  // The feeds: what is shown is also kept in refs, so a Realtime row and a poll can be merged without a stale closure
+  const eventsRef = useRef<EventRow[]>([]);
+  const memoriesRef = useRef<MemoryRow[]>([]);
+  const viewingRef = useRef<'live' | string>('live');
+  const feedSidRef = useRef<string | null>(null);
+  const [realtime, setRealtime] = useState<string | null>(null); // the channel's last status; anything but SUBSCRIBED polls
+  const [feedSid, setFeedSid] = useState<string | null>(null); // the era the shown feed was loaded for
+  const [hidden, setHidden] = useState(() => document.hidden);
+  viewingRef.current = viewing;
+
+  const showEvents = useCallback((next: EventRow[]) => {
+    eventsRef.current = next;
+    setEvents(next);
+  }, []);
+
+  const showMemories = useCallback((next: MemoryRow[]) => {
+    memoriesRef.current = next;
+    setMemories(next);
+  }, []);
+
+  /** Adds event rows that are not shown yet (newest first, no duplicates); returns the ones that were new. */
+  const addEvents = useCallback((rows: EventRow[]): EventRow[] => {
+    const fresh = newRows(eventsRef.current, rows);
+    if (fresh.length > 0) showEvents(mergeRows(eventsRef.current, fresh, EVENT_LIMIT));
+    return fresh;
+  }, [showEvents]);
+
+  const addMemories = useCallback((rows: MemoryRow[]) => {
+    const fresh = newRows(memoriesRef.current, rows);
+    if (fresh.length > 0) showMemories(mergeRows(memoriesRef.current, fresh, MEMORY_LIMIT));
+  }, [showMemories]);
+
+  /** Sound and speech bubble for rows that arrived live (not for a long catch-up after a hidden tab). */
+  const announce = useCallback((rows: EventRow[]) => {
+    if (rows.length === 0 || rows.length > 5) return;
+    for (const row of [...rows].reverse()) playEventSound(row.type);
+    const say = rows.find((r) => r.type === 'say' && r.agent_id);
+    if (say?.agent_id) setSayEvent({ id: say.id, agentId: say.agent_id, message: say.message.replace(/^[^:]*:\s*/, '') });
+  }, []);
+
+  /** Records the era whose feed is on screen; polling only ever follows the live era's own feed. */
+  const markFeedLoaded = useCallback((sid: string) => {
+    feedSidRef.current = sid;
+    setFeedSid(sid);
+  }, []);
+
+  /**
+   * One poll (the fallback when Realtime is not delivering): the newest events and records of the live era that are
+   * newer than the newest shown, merged by id so a row Realtime also delivered is not shown twice. False when the
+   * database did not answer (the caller backs off).
+   */
+  const pollFeed = useCallback(async (): Promise<boolean> => {
+    const sid = feedSidRef.current;
+    if (!sid || viewingRef.current !== 'live' || sid !== sim.session?.id) return true;
+    const evSince = pollSince(eventsRef.current);
+    const memSince = pollSince(memoriesRef.current);
+    let evQuery = supabase.from('events').select('*').eq('session_id', sid);
+    if (evSince) evQuery = evQuery.gte('created_at', evSince);
+    let memQuery = supabase.from('memories').select('*').eq('session_id', sid);
+    if (memSince) memQuery = memQuery.gte('created_at', memSince);
+    const [ev, mem] = await Promise.all([
+      evQuery.order('created_at', { ascending: false }).limit(EVENT_LIMIT),
+      memQuery.order('created_at', { ascending: false }).limit(MEMORY_LIMIT),
+    ]);
+    if (feedSidRef.current !== sid || viewingRef.current !== 'live') return true; // moved on while waiting
+    if (ev.data) announce(addEvents(ev.data as EventRow[]));
+    if (mem.data) addMemories(mem.data as MemoryRow[]);
+    return !ev.error && !mem.error;
+  }, [addEvents, addMemories, announce]);
+
   useEffect(() => {
     void loadAll();
     const unsub = sim.subscribe(() => {
@@ -196,29 +269,71 @@ export default function WorldApp() {
         setSessionTitle(sim.session.title);
       }
     });
+    let disposed = false;
     const channel = supabase
       .channel('world-feed')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'events' }, (payload) => {
         const row = payload.new as EventRow;
-        if (viewing !== 'live' || row.session_id !== sim.session?.id) return;
-        setEvents((prev) => [row, ...prev].slice(0, 100));
-        playEventSound(row.type);
-        if (row.type === 'say' && row.agent_id) {
-          setSayEvent({ id: row.id, agentId: row.agent_id, message: row.message.replace(/^[^:]*:\s*/, '') });
-        }
+        if (viewingRef.current !== 'live' || row.session_id !== sim.session?.id) return;
+        announce(addEvents([row]));
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'memories' }, (payload) => {
         const row = payload.new as MemoryRow;
-        if (viewing !== 'live' || row.session_id !== sim.session?.id) return;
-        setMemories((prev) => [row, ...prev].slice(0, 120));
+        if (viewingRef.current !== 'live' || row.session_id !== sim.session?.id) return;
+        addMemories([row]);
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (disposed) return;
+        setRealtime(status);
+        if (status === 'SUBSCRIBED') void pollFeed(); // rows that came in between the last poll and the subscription
+      });
+    const onVisibility = () => setHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
       unsub();
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Realtime is the primary feed; while it is not delivering (and the tab is visible) poll for what it would have sent
+  useEffect(() => {
+    if (!feedSid || feedSid !== sessionId || viewing !== 'live') return;
+    if (pollPlan(realtime, hidden) !== 'poll') return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const run = async () => {
+      const ok = await pollFeed().catch(() => false);
+      if (cancelled) return;
+      failures = ok ? 0 : failures + 1;
+      timer = setTimeout(() => void run(), pollDelay(failures));
+    };
+    void run();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [feedSid, sessionId, viewing, realtime, hidden, pollFeed]);
+
+  // A window that only watches (another window drives the era) re-reads the era so its map, tick and cards follow
+  const watching = driverNote !== null && viewing === 'live' && sessionId !== null;
+  useEffect(() => {
+    if (watchRefreshPlan(watching, hidden) !== 'refresh') return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const run = async () => {
+      await sim.refreshWatching().catch(() => undefined);
+      if (!cancelled) timer = setTimeout(() => void run(), WATCH_REFRESH_MS);
+    };
+    timer = setTimeout(() => void run(), WATCH_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [watching, hidden]);
 
   // hotbar keys 1-9 select villagers
   useEffect(() => {
@@ -315,8 +430,9 @@ export default function WorldApp() {
       .eq('session_id', sid)
       .order('created_at', { ascending: false })
       .limit(120);
-    setEvents(eventRows ?? []);
-    setMemories(memoryRows ?? []);
+    showEvents((eventRows ?? []) as EventRow[]);
+    showMemories((memoryRows ?? []) as MemoryRow[]);
+    markFeedLoaded(sid);
   }
 
   /** Opens an archived session read-only: final world + its chronicle. */

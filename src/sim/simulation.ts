@@ -59,6 +59,8 @@ export interface SessionRow {
 }
 
 const WATCHING_NOTE = 'Another window is driving this era — you are watching.';
+/** A watcher that finds the lease free: the driver has gone, nothing is claimed for it (it must press the button). */
+const DRIVER_GONE_NOTE = 'The window that was driving this era has stopped — press "Try to take over" to continue it.';
 
 /** One random id per Simulation instance (letters, digits and hyphens only). */
 function makeDriverId(): string {
@@ -130,6 +132,7 @@ class Simulation {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
   private starting = false;
+  private refreshing = false;
   private listeners = new Set<Listener>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private memoriesCache = new Map<string, string[]>();
@@ -500,8 +503,11 @@ class Simulation {
    * Rebuilds the world from the database. A window that is driving and already shows this roster keeps
    * what it holds in memory for what is newer than the last write (carried items, unheard chat, the turn
    * cursor); `fresh` forces the database's values, for a window taking over from a watching view.
+   * `refresh` is a watching window's periodic re-read (refreshWatching): reads only the rows that show on the
+   * map and in the cards, touches no bond state, reports no error, and drops its result if this window stopped
+   * watching (or changed era) while it was reading.
    */
-  private async loadWorld(fresh = false) {
+  private async loadWorld(fresh = false, refresh = false) {
     if (!this.session) return;
     const sid = this.session.id;
     const { data: agentRowsData, error } = await supabase
@@ -512,6 +518,7 @@ class Simulation {
       .order('id', { ascending: true }); // id breaks a created_at tie (rows of an older era seeded in one INSERT), so the roster order is always the same
     let agentRows = agentRowsData;
     if (error) {
+      if (refresh) return; // transient: the next refresh tries again
       this.error = 'Could not load villagers from the database.';
       this.emit();
       return;
@@ -535,11 +542,12 @@ class Simulation {
 
     // civilization state: one row per session
     let civ: CivState = { wood: 0, food: 0, gold: 0, stone: 0, age: 1 };
-    const { data: civRow } = await supabase
+    const { data: civRow, error: civError } = await supabase
       .from('civ')
       .select('*')
       .eq('session_id', sid)
       .maybeSingle();
+    if (civError && refresh) return; // a partial read would show an empty stockpile: keep the last view
     if (civRow) {
       civ = {
         wood: civRow.wood,
@@ -551,10 +559,11 @@ class Simulation {
     }
 
     // persisted built structures for this session
-    const { data: builtRows } = await supabase
+    const { data: builtRows, error: builtError } = await supabase
       .from('structures')
       .select('*')
       .eq('session_id', sid);
+    if (builtError && refresh) return;
     const builtStructures: WorldObject[] = (builtRows ?? []).map((r) => ({
       id: r.id,
       territory: r.territory as TerritoryId,
@@ -569,10 +578,11 @@ class Simulation {
 
     // depleted seeds: mines taken this session (null respawn_tick = permanent),
     // plus animals whose due-tick is still ahead of the tick we load at
-    const { data: depletedRows } = await supabase
+    const { data: depletedRows, error: depletedError } = await supabase
       .from('depleted_objects')
       .select('*')
       .eq('session_id', sid);
+    if (depletedError && refresh) return;
     const stillDepleted = (depletedRows ?? []).filter(
       (r) => r.respawn_tick == null || (r.respawn_tick as number) > loadedTick
     );
@@ -604,10 +614,12 @@ class Simulation {
       energy: row.energy ?? 100,
       ...carriedOf(row),
     }));
-    await this.hydrateRelationships(agents);
-    await this.recoverBonds(agents);
+    if (!refresh) {
+      await this.hydrateRelationships(agents);
+      await this.recoverBonds(agents);
+    }
 
-    if (!keepLive) {
+    if (!keepLive && !refresh) {
       // the exact next actor: the cursor saved after the last turn, checked against the roster we just loaded
       const { data: cursorRow } = await supabase
         .from('sessions')
@@ -619,6 +631,7 @@ class Simulation {
       this.lastActorIndex = cursor.lastActorIndex;
     }
 
+    if (refresh && !this.stillWatching(sid)) return; // taken over, or another era, while reading: this view is stale
     const objects = [...seeds, ...builtStructures];
     this.snapshot = {
       tick: loadedTick,
@@ -630,6 +643,33 @@ class Simulation {
     this.history = [];
     this.pushHistory();
     this.emit();
+  }
+
+  private stillWatching(sid: string): boolean {
+    return this.readOnly && !this.starting && this.session?.id === sid;
+  }
+
+  /**
+   * A watching window's refresh (called every few seconds by the UI while the tab is visible): asks the database
+   * who drives (read-only `session_lease_state`) and re-reads the era's rows through `loadWorld`, so the map, the
+   * tick and the villager cards follow the driver. It writes nothing, never claims the lease (when the driver is
+   * gone the note says so and the person presses "Try to take over"), and ignores a failed read.
+   */
+  async refreshWatching() {
+    if (!this.readOnly || !this.session || this.starting || this.refreshing || this.running) return;
+    const sid = this.session.id;
+    this.refreshing = true;
+    try {
+      const state = await this.leaseState(true);
+      if (!this.stillWatching(sid)) return;
+      const note = state === 'free' ? DRIVER_GONE_NOTE : state === 'other' ? WATCHING_NOTE : this.driverNote;
+      const noteChanged = note !== this.driverNote;
+      this.driverNote = note;
+      await this.loadWorld(false, true);
+      if (noteChanged) this.emit();
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   /**
@@ -1043,7 +1083,7 @@ class Simulation {
    * heartbeat missing or 30 s old), 'mine', or 'other' (someone else, fresh). This window's own clock is
    * never consulted, so a skewed clock cannot make a live driver look stale (R7.6). Null when it could not be asked.
    */
-  private async leaseState(): Promise<'free' | 'mine' | 'other' | null> {
+  private async leaseState(quiet = false): Promise<'free' | 'mine' | 'other' | null> {
     if (!this.session) return null;
     const { data, error } = await supabase.rpc('session_lease_state', {
       p_session: this.session.id,
@@ -1051,7 +1091,7 @@ class Simulation {
       p_ttl_seconds: DRIVER_TTL_SECONDS,
     });
     if (error) {
-      this.error = 'Could not check whether another window is driving this era.';
+      if (!quiet) this.error = 'Could not check whether another window is driving this era.';
       return null;
     }
     return data === 'free' || data === 'mine' || data === 'other' ? data : null;

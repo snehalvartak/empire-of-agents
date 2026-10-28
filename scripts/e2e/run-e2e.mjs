@@ -24,6 +24,7 @@ const MANIFEST = parseManifest(ISLAND_MANIFEST_TOML);
 const STORY_TITLE = 'The Dawn of the Stubborn Hearth'; // the gateway's fixed answer to the chronicle-title request
 const GREETING = 'Meet me at the old oak at dawn';
 const WATCH_BANNER = 'Another window is driving this era — you are watching.';
+const DRIVER_GONE_BANNER = 'The window that was driving this era has stopped — press "Try to take over" to continue it.';
 const SPEED = 'Fast'; // 1.5 s per tick: the fastest speed the UI offers
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -168,6 +169,13 @@ const isWrite = (e) => !['GET', 'HEAD', 'OPTIONS'].includes(e.method) && !isLeas
 const isRpc = (name) => (e) => e.method === 'POST' && e.url.split('?')[0] === `/rest/v1/rpc/${name}`;
 const isClaim = isRpc('claim_session_lease');
 const tableOf = (e) => (/\/rest\/v1\/([a-z_]+)/.exec(e.url) ?? [])[1] ?? e.url.split('?')[0];
+// the Chronicle panel: one row per event (a type badge, the message, the tick), newest first
+const FEED_ROWS = 'div.max-h-\\[560px\\] .rounded-lg.px-3.py-2';
+const feedCount = (p) => p.locator(FEED_ROWS).count();
+const feedMessages = (p) => p.locator(`${FEED_ROWS} > span.text-amber-50\\/85`).allInnerTexts();
+// the polling fallback's request: the era's events (or memories) at or after the newest row on screen
+const isFeedPoll = (table) => (e) => e.method === 'GET' && tableOf(e) === table && /created_at=gte\./.test(decodeURIComponent(e.url));
+const eventCount = (sid) => q(`SELECT count(*)::int AS n FROM events WHERE session_id=${lit(sid)}`)[0].n;
 
 // ---------------------------------------------------------------------------------------------- state shared by scenarios
 const S = {};
@@ -332,11 +340,23 @@ async function scenarioRun() {
   const uiT = await uiTick(p1);
   check('UI: the header tick follows the database (within one turn)', Math.abs(uiT - maxTick(era)) <= 1, `ui=${uiT} db=${maxTick(era)}`);
   check('DB: memories were written for the turns, each with the era and a tick', q(`SELECT 1 FROM memories WHERE session_id=${lit(era)} AND tick IS NOT NULL`).length > 0 && q(`SELECT 1 FROM memories WHERE session_id=${lit(era)} AND tick IS NULL`).length === 0);
-  // what stops updating without realtime
-  const feedRows = await p1.locator('div.max-h-\\[560px\\] .rounded-lg.px-3.py-2').count();
-  const dbEvents = q(`SELECT count(*)::int AS n FROM events WHERE session_id=${lit(era)}`)[0].n;
-  note(`without Realtime the Chronicle panel does not update while the era runs: ${feedRows} rows shown in the browser, ${dbEvents} events in the database at tick ${t} (the feed is filled once per load and by realtime INSERTs only; there is no polling)`);
-  S.feedFrozen = { feedRows, dbEvents };
+  // Realtime is refused, so the Chronicle can only follow the database through the polling fallback (src/sim/feed.ts).
+  // Measured before the fallback: 4 rows on screen against 19 events in the database at tick 8.
+  const sample = { rows: 0, db: 0 };
+  const tracked = await waitFor('the Chronicle panel follows the database', async () => {
+    sample.rows = await feedCount(p1);
+    sample.db = eventCount(era);
+    return sample.db >= 15 && sample.rows <= sample.db && sample.db - sample.rows <= 8;
+  }, { timeout: 20000, interval: 400 }).then(() => true, () => false);
+  check(`UI: with Realtime refused the Chronicle panel tracks the database while the era runs: ${sample.rows} rows on screen, ${sample.db} events in the database (was 4 vs 19 at tick ${t} before the polling fallback); within 8 rows`,
+    tracked, json(sample));
+  const polls = requestsOf('p1', isFeedPoll('events'));
+  check(`the panel was kept current by the fallback poll: p1 sent ${polls.length} GET /rest/v1/events requests for rows at or after its newest row (and no websocket delivered anything: ${gw.realtimeAttempts.length} refused upgrades)`,
+    polls.length >= 2 && gw.realtimeAttempts.length >= 1, json(polls.slice(0, 2)));
+  check('the poll is a small read: the era\'s events only, newest first, limited to the panel size (100)',
+    polls.every((e) => decodeURIComponent(e.url).includes(`session_id=eq.${era}`) && /order=created_at\.desc/.test(e.url) && /limit=100/.test(e.url)), json(polls.slice(0, 1)));
+  const memPolls = requestsOf('p1', isFeedPoll('memories'));
+  check(`the Records feed is polled the same way (${memPolls.length} GET /rest/v1/memories requests)`, memPolls.length >= 2);
   await shot(p1, 'b1-running');
 }
 
@@ -437,7 +457,43 @@ async function scenarioSingleDriver() {
   const allTicks = q(`SELECT tick FROM agent_positions WHERE session_id=${lit(era)} ORDER BY tick`).map((r) => r.tick);
   check('DB: still exactly one position row per tick (two drivers would double-write ticks)', allTicks.every((v, i) => v === i + 1) && new Set(allTicks).size === allTicks.length, json(allTicks.slice(-12)));
   check('DB: the lease is still p1\'s after 6 s of p2 watching', eraRow(era).driver_id === S.driverA);
-  note(`the watcher's map is frozen: p2 showed tick ${watchTick} at load and ${await uiTick(p2)} after 6 s while the database moved to ${t1Ticks} (R7.6 promises "live feed"; the feed needs Realtime, which is refused here; the world itself is not subscribed or polled even with Realtime)`);
+
+  // The watcher follows the era on its own: p2 is never reloaded, p1 keeps driving. Its Replay tab lists each villager with (x, y).
+  await openReplayTab(p2);
+  const posOf = async (p) => {
+    const out = {};
+    for (const t of await p.locator('button', { hasText: /\(\d+, \d+\)/ }).allInnerTexts()) {
+      const m = /(\w+)\s*\((\d+), (\d+)\)/.exec(t);
+      if (m) out[m[1]] = [Number(m[2]), Number(m[3])];
+    }
+    return out;
+  };
+  const picked = p2.locator('button', { hasText: /\(\d+, \d+\)/ }).first();
+  await picked.click(); // a selection the refresh must not undo
+  const pickedClass = async () => (await picked.getAttribute('class')) ?? '';
+  const startedWatching = { tick: await uiTick(p2), pos: await posOf(p2) };
+  const followedAt = Date.now();
+  const followed = await waitFor('the watcher follows the era', async () => {
+    const tk = await uiTick(p2);
+    const pos = await posOf(p2);
+    return tk > startedWatching.tick && json(pos) !== json(startedWatching.pos) ? { tk, pos } : null;
+  }, { timeout: 12000, interval: 250 }).catch(() => null);
+  check(`UI: the watcher's tick and villager positions advance without a reload while the driver runs: tick ${watchTick} at load, ${startedWatching.tick} -> ${followed?.tk} within ${((Date.now() - followedAt) / 1000).toFixed(1)} s, ${json(startedWatching.pos)} -> ${json(followed?.pos)}`,
+    followed && Date.now() - followedAt <= 10000 && followed.tk > watchTick, json([startedWatching, followed]));
+  if (followed) {
+    const known = q(`SELECT a.name, p.x, p.y FROM agent_positions p JOIN agents a ON a.id = p.agent_id WHERE p.session_id=${lit(era)}`);
+    check('the positions the watcher shows are positions the driver really wrote (each matches an agent_positions row of that villager)',
+      Object.entries(followed.pos).every(([name, [px, py]]) => known.some((r) => r.name === name && r.x === px && r.y === py)), json([followed.pos]));
+  }
+  check(`UI: the watcher's tick is within 6 ticks of the database (${await uiTick(p2)} vs ${maxTick(era)}), not frozen at the ${watchTick} it loaded`, Math.abs(maxTick(era) - (await uiTick(p2))) <= 6);
+  check('UI: the watcher kept its own selection (the Replay tab and the villager it picked) across the refreshes', (await pickedClass()).includes('border-amber-600/60') && (await p2.getByRole('button', { name: /Replay/ }).first().isVisible()));
+  const leaseChecks = requestsOf('p2', isLeaseRead);
+  check(`the refresh re-asked who drives (${leaseChecks.length} POST session_lease_state calls from p2, the first at load) and every answer was "other" while p1 drove`,
+    leaseChecks.length >= 3 && leaseChecks.every((e) => e.status === 200 && e.responseSnippet.trim() === '"other"'), json(leaseChecks.map((e) => e.responseSnippet)));
+  check('the watcher still sent no write while refreshing: no non-GET request from p2 other than the read-only session_lease_state', requestsOf('p2', isWrite).length === 0, requestsOf('p2', isWrite).map((e) => `${e.method} ${e.url}`).join('\n'));
+  check('the refresh never touched the lease or the bonds: no claim/renew/release call and no relationships request beyond the load-time bond GETs',
+    requestsOf('p2', (e) => isClaim(e) || isRpc('renew_session_lease')(e) || isRpc('release_session_lease')(e)).length === 0
+    && requestsOf('p2', (e) => tableOf(e) === 'relationships' && e.method !== 'GET').length === 0);
 
   // p2 tries to take over while p1 is alive: the real conditional UPDATE comes back with zero rows
   const nPatch = gw.log.length;
@@ -468,6 +524,16 @@ async function scenarioSingleDriver() {
   await sleep(2500);
   check('p1 wrote nothing more after it was closed (tick stable)', maxTick(era) === settledTick, `${settledTick} -> ${maxTick(era)}`);
   note(`closing p1 mid-run: tick was ${tBeforeClose} when the close started and ${settledTick} when it settled`);
+
+  // the driver is gone: the watcher's refresh notices (the database says the lease is free) and says so, but never claims it
+  const goneAt = Date.now();
+  await p2.getByText(DRIVER_GONE_BANNER).waitFor({ timeout: 12000 }).then(
+    () => check(`the watcher noticed on its own that the driver is gone (within ${((Date.now() - goneAt) / 1000).toFixed(1)} s): the banner now invites "Try to take over"`, true),
+    () => check('the watcher noticed on its own that the driver is gone: the banner invites "Try to take over"', false, 'banner text not shown'));
+  const freeAnswers = requestsOf('p2', isLeaseRead).filter((e) => e.responseSnippet.trim() === '"free"');
+  check('that came from the read-only session_lease_state answering "free"; the watcher did NOT claim the lease by itself (only its one deliberate, denied click claimed)',
+    freeAnswers.length >= 1 && requestsOf('p2', isClaim).length === 1 && eraRow(era).driver_id === null, json([freeAnswers.length, requestsOf('p2', isClaim).length, eraRow(era).driver_id]));
+  check('"Try to take over" is still the way back: the button is offered, not Begin', (await btn(p2, 'Try to take over').isVisible()) && (await btn(p2, 'Begin').count()) === 0);
 
   // p2 takes over
   const nClaim = gw.log.length;
